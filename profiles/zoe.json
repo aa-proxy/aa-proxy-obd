@@ -1,0 +1,20 @@
+{
+  "name": "Renault Zoe",
+  "pids": [
+    {
+      "ecu_tx": "7E4",
+      "ecu_rx": "7EC",
+      "pid": "222002",
+      "pre_request": "10C0",
+      "fields": [
+        {
+          "name": "battery_level_percentage",
+          "byte_index": -3,
+          "length": 3,
+          "multiplier": 0.02,
+          "offset": -2621.44
+        }
+      ]
+    }
+  ]
+}
