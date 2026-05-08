@@ -1,0 +1,125 @@
+{
+  "name": "Hyundai Ioniq 5",
+  "pids": [
+    {
+      "ecu_tx": "7E4",
+      "ecu_rx": "7EC",
+      "pid": "220105",
+      "fields": [
+        {
+          "name": "battery_level_percentage",
+          "byte_index": 31,
+          "length": 1,
+          "multiplier": 0.5,
+          "offset": 0.0
+        },
+        {
+          "name": "battery_level_wh",
+          "byte_index": 28,
+          "length": 2,
+          "multiplier": 2.0,
+          "offset": 0.0
+        },
+        {
+          "name": "battery_state_of_health",
+          "byte_index": 25,
+          "length": 2,
+          "multiplier": 0.1,
+          "offset": 0.0
+        }
+      ]
+    },
+    {
+      "ecu_tx": "7E4",
+      "ecu_rx": "7EC",
+      "pid": "220101",
+      "fields": [
+        {
+          "name": "battery_voltage",
+          "byte_index": 12,
+          "length": 2,
+          "multiplier": 0.1,
+          "offset": 0.0
+        },
+        {
+          "name": "battery_current",
+          "byte_index": 10,
+          "length": 2,
+          "multiplier": 0.1,
+          "offset": 0.0,
+          "signed": true
+        }
+      ]
+    },
+    {
+      "ecu_tx": "7B3",
+      "ecu_rx": "7BB",
+      "pid": "220100",
+      "fields": [
+        {
+          "name": "external_temp_celsius",
+          "byte_index": 6,
+          "length": 1,
+          "multiplier": 0.5,
+          "offset": -40.0
+        },
+        {
+          "name": "interior_temp_celsius",
+          "byte_index": 5,
+          "length": 1,
+          "multiplier": 0.5,
+          "offset": -40.0
+        }
+      ]
+    },
+    {
+      "ecu_tx": "7C6",
+      "ecu_rx": "7CE",
+      "pid": "22B002",
+      "fields": [
+        {
+          "name": "odometer_km",
+          "byte_index": 6,
+          "length": 3,
+          "multiplier": 1.0,
+          "offset": 0.0
+        }
+      ]
+    },
+    {
+      "ecu_tx": "7A0",
+      "ecu_rx": "7A8",
+      "pid": "22C00B",
+      "fields": [
+        {
+          "name": "tire_fl_kpa",
+          "byte_index": 4,
+          "length": 1,
+          "multiplier": 1.37895,
+          "offset": 0.0
+        },
+        {
+          "name": "tire_fr_kpa",
+          "byte_index": 9,
+          "length": 1,
+          "multiplier": 1.37895,
+          "offset": 0.0
+        },
+        {
+          "name": "tire_rl_kpa",
+          "byte_index": 14,
+          "length": 1,
+          "multiplier": 1.37895,
+          "offset": 0.0
+        },
+        {
+          "name": "tire_rr_kpa",
+          "byte_index": 19,
+          "length": 1,
+          "multiplier": 1.37895,
+          "offset": 0.0
+        }
+      ]
+    }
+  ]
+}
