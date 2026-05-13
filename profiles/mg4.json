@@ -1,0 +1,33 @@
+{
+  "name": "MG4",
+  "pids": [
+    {
+      "ecu_tx": "7DF",
+      "ecu_rx": "7E8",
+      "pid": "015B",
+      "fields": [
+        {
+          "name": "battery_level_percentage",
+          "byte_index": 2,
+          "length": 1,
+          "multiplier": 0.39215686,
+          "offset": 0.0
+        }
+      ]
+    },
+    {
+      "ecu_tx": "7DF",
+      "ecu_rx": "7E8",
+      "pid": "0146",
+      "fields": [
+        {
+          "name": "external_temp_celsius",
+          "byte_index": 2,
+          "length": 1,
+          "multiplier": 1.0,
+          "offset": -40.0
+        }
+      ]
+    }
+  ]
+}
