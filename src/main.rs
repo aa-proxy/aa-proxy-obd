@@ -77,7 +77,7 @@ struct Args {
     debug: bool,
 
     /// Config file path
-    #[clap(short, long, parse(from_os_str), default_value = "/etc/canze-rs.conf")]
+    #[clap(short, long, parse(from_os_str), default_value = "/etc/aa-proxy-obd.conf")]
     config: std::path::PathBuf,
 }
 
@@ -282,7 +282,7 @@ pub async fn get_raw_pid(
 async fn main() -> Result<()> {
     let args = Args::parse();
     logging_init(args.debug);
-    info!("<b><blue>canze-rs</> started");
+    info!("<b><blue>aa-proxy-obd</> started");
     info!("Using config file: <b><blue>{:?}</>", args.config);
     let conf = match Ini::load_from_file(args.config) {
         Ok(c) => c,

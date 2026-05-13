@@ -31,8 +31,8 @@ pub struct VehicleConfig {
 
 impl VehicleConfig {
     pub fn load(car_name: &str) -> io::Result<Self> {
-        // Construct the expected profile path: e.g. "/etc/canze-rs/zoe.json"
-        let filename = format!("/etc/canze-rs/{}.json", car_name.to_lowercase());
+        // Construct the expected profile path: e.g. "/etc/aa-proxy-obd/zoe.json"
+        let filename = format!("/etc/aa-proxy-obd/{}.json", car_name.to_lowercase());
         
         let contents = fs::read_to_string(&filename).map_err(|e| {
             Error::new(
