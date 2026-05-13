@@ -1,0 +1,19 @@
+{
+  "name": "Kia Niro",
+  "pids": [
+    {
+      "ecu_tx": "7DF",
+      "ecu_rx": "7E8",
+      "pid": "220101",
+      "fields": [
+        {
+          "name": "battery_level_percentage",
+          "byte_index": 4,
+          "length": 1,
+          "multiplier": 0.5,
+          "offset": 0.0
+        }
+      ]
+    }
+  ]
+}
