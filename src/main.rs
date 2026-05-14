@@ -43,6 +43,16 @@ struct BatteryData {
     external_temp_celsius: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     battery_capacity_wh: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    battery_level_wh: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    battery_state_of_health: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    battery_voltage: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    battery_current: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    interior_temp_celsius: Option<f32>,
 }
 
 #[derive(Debug, Serialize, Default, Clone)]
@@ -199,6 +209,8 @@ pub fn get_payload(response: &str) -> Vec<u8> {
 }
 
 pub fn extract_value(payload: &[u8], metric: &MetricConfig) -> Option<f32> {
+    // The payload array includes the 3-byte header (e.g. 62 01 05).
+    // The configured byte_index assumes the header is stripped (0 = first data byte).
     let idx = if metric.byte_index < 0 {
         let positive_idx = payload.len() as i32 + metric.byte_index;
         if positive_idx < 0 { return None; }
@@ -396,11 +408,18 @@ async fn main() -> Result<()> {
                 }
 
                 // POST Battery
-                if metrics_map.contains_key("battery_level_percentage") || metrics_map.contains_key("external_temp_celsius") {
+                if metrics_map.contains_key("battery_level_percentage") || metrics_map.contains_key("external_temp_celsius") || 
+                   metrics_map.contains_key("battery_level_wh") || metrics_map.contains_key("battery_state_of_health") ||
+                   metrics_map.contains_key("battery_voltage") || metrics_map.contains_key("battery_current") {
                     let data = BatteryData {
                         battery_level_percentage: metrics_map.get("battery_level_percentage").copied(),
                         external_temp_celsius: metrics_map.get("external_temp_celsius").copied(),
                         battery_capacity_wh,
+                        battery_level_wh: metrics_map.get("battery_level_wh").map(|&v| v as u64),
+                        battery_state_of_health: metrics_map.get("battery_state_of_health").copied(),
+                        battery_voltage: metrics_map.get("battery_voltage").copied(),
+                        battery_current: metrics_map.get("battery_current").copied(),
+                        interior_temp_celsius: metrics_map.get("interior_temp_celsius").copied(),
                     };
                     if let Err(e) = client.post("http://localhost/battery").json(&data).send().await {
                         warn!("Failed to POST /battery: {}", e);
