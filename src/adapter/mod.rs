@@ -8,6 +8,7 @@ use std::collections::HashMap;
 pub mod bluetooth;
 pub mod elm327;
 pub mod pairing;
+pub mod usb;
 
 pub type Metrics = HashMap<String, f32>;
 

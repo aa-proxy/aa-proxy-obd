@@ -1,6 +1,6 @@
 extern crate ctrlc;
 use clap::Parser;
-use log::{error, info};
+use log::info;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -16,6 +16,7 @@ mod profile;
 mod scheduler;
 
 use crate::adapter::bluetooth::BluetoothElm327Adapter;
+use crate::adapter::Adapter;
 use crate::config::{Config, DeviceType};
 use crate::output::Publisher;
 use crate::profile::VehicleProfile;
@@ -57,19 +58,27 @@ async fn main() -> anyhow::Result<()> {
     logging::init(&cfg.daemon.log_level, &cfg.daemon.log_file, args.debug);
     info!("aa-proxy-obd started");
 
-    if cfg.device.kind != DeviceType::Bluetooth {
-        error!("device.type must be 'bluetooth' in this build");
-        return Ok(());
-    }
-    let mac = cfg.device.bt_mac.clone()
-        .ok_or_else(|| anyhow::anyhow!("device.bt_mac required"))?;
     let car_model = cfg.vehicle.profile.clone()
-        .ok_or_else(|| anyhow::anyhow!("vehicle.profile required"))?;
-
+        .ok_or_else(|| anyhow::anyhow!("vehicle.profile required for ELM327 device types"))?;
     let profile = VehicleProfile::load(&car_model)?;
     info!("profile: {}", profile.name);
 
-    let adapter = BluetoothElm327Adapter::new(&mac, profile, cfg.device.bt_passkey)?;
+    let adapter: Box<dyn Adapter> = match cfg.device.kind {
+        DeviceType::Bluetooth => {
+            let mac = cfg.device.bt_mac.clone()
+                .ok_or_else(|| anyhow::anyhow!("device.bt_mac required for type='bluetooth'"))?;
+            Box::new(BluetoothElm327Adapter::new(&mac, profile, cfg.device.bt_passkey)?)
+        }
+        DeviceType::Usb => {
+            let port = cfg.device.usb_port.clone()
+                .ok_or_else(|| anyhow::anyhow!("device.usb_port required for type='usb'"))?;
+            let baud = cfg.device.usb_baud.unwrap_or(115200);
+            Box::new(crate::adapter::usb::UsbElm327Adapter::new(&port, baud, profile)?)
+        }
+        DeviceType::Wican => {
+            anyhow::bail!("device.type='wican' not yet implemented (arrives in the next commit)");
+        }
+    };
     let publisher = Publisher::new(cfg.daemon.api_base_url.clone(), cfg.vehicle.battery_capacity_wh);
 
     let running = Arc::new(AtomicBool::new(true));

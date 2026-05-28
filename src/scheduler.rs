@@ -9,8 +9,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-pub async fn run<A: Adapter>(
-    mut adapter: A,
+pub async fn run(
+    mut adapter: Box<dyn Adapter>,
     daemon: DaemonSection,
     publisher: Publisher,
     running: Arc<AtomicBool>,
