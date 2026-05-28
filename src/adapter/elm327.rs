@@ -1,19 +1,18 @@
-// src/adapter/elm327.rs
-//
-// ELM327 session helper, generic over an async byte stream (T: AsyncRead +
-// AsyncWrite + Unpin). Same protocol as the previous inline main.rs code —
-// moved here so both the Bluetooth and (later) USB adapters share it.
+// ELM327 session helper, generic over an async byte stream
+// (T: AsyncRead + AsyncWrite + Unpin) so it can drive both Bluetooth RFCOMM
+// and USB serial transports.
 
-use crate::profile::{FieldSpec, UdsPidSource};
+use crate::profile::{BroadcastSource, FieldSpec, UdsPidSource};
 use anyhow::{anyhow, Context, Result};
 use log::{debug, trace};
+use std::collections::HashMap;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use std::io::ErrorKind;
 use tokio::io::AsyncReadExt;
 use tokio::time::timeout;
 
-/// Default init sequence (preserved from v0.2.0). A profile may override via
+/// Default ELM327 initialisation sequence. A profile may override it via
 /// elm327.init.
 pub const DEFAULT_INIT: &[&str] = &[
     "ATZ", "ATE0", "ATAL", "ATST96", "ATCP18", "ATFCSD300000", "ATSP6",
@@ -74,8 +73,7 @@ where
         Ok(())
     }
 
-    /// Send a uds_pid source, return the assembled payload (single-frame for
-    /// now; ISO-TP multiframe arrives in a later task).
+    /// Send a uds_pid source and return the single-frame response payload.
     pub async fn poll_uds_pid(&mut self, uds: &UdsPidSource) -> Result<Vec<u8>> {
         self.send_cmd(&format!("ATSH{}", uds.ecu_tx)).await?;
         self.send_cmd(&format!("ATCRA{}", uds.ecu_rx)).await?;
@@ -90,8 +88,8 @@ where
         Ok(get_payload(&String::from_utf8_lossy(&raw)))
     }
 
-    /// Poll a uds_pid source with ISO-TP flow-control reassembly. Used when the
-    /// source has multiframe = true. Ported from manio's read_uds_multiframe.
+    /// Poll a uds_pid source with ISO-TP flow-control reassembly, for responses
+    /// that span multiple frames. Used when the source sets multiframe = true.
     pub async fn poll_uds_pid_multiframe(&mut self, uds: &UdsPidSource) -> Result<Vec<u8>> {
         let sh   = u32::from_str_radix(&uds.ecu_tx, 16).context("ecu_tx not hex")?;
         let cra  = u32::from_str_radix(&uds.ecu_rx, 16).context("ecu_rx not hex")?;
@@ -148,10 +146,76 @@ where
         // extract_value byte branch applies its +3 header skip consistently.
         assemble_iso_tp(&lines).ok_or_else(|| anyhow!("multiframe assembly failed"))
     }
+
+    /// Run a BroadcastSource: send init, send the command (typically ATMA),
+    /// read lines until the deadline or stop_when is satisfied, route to frames,
+    /// then extract each frame's fields from its most recent payload.
+    pub async fn monitor_broadcast(
+        &mut self,
+        spec: &BroadcastSource,
+    ) -> Result<HashMap<String, f32>> {
+        for cmd in &spec.init {
+            let _ = self.send_cmd(cmd).await;
+        }
+        // ATMA streams continuously; do not wait for a '>' prompt.
+        self.stream.write_all(format!("{}\r", spec.command).as_bytes()).await
+            .context("broadcast command write")?;
+
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(spec.deadline_ms);
+        let mut lines: Vec<String> = Vec::new();
+        let mut consecutive_timeouts: u64 = 0;
+        let idle_attempts = ((spec.idle_timeout_ms + 199) / 200).max(1);
+
+        while tokio::time::Instant::now() < deadline {
+            match read_line_raw(&mut self.stream, 200).await {
+                Ok(b) => {
+                    consecutive_timeouts = 0;
+                    let ascii = String::from_utf8_lossy(&b).into_owned();
+                    if !ascii.trim().is_empty() {
+                        lines.push(ascii);
+                    }
+                }
+                Err(e) if e.kind() == ErrorKind::TimedOut => {
+                    consecutive_timeouts += 1;
+                    if consecutive_timeouts >= idle_attempts { break; }
+                }
+                Err(e) => return Err(anyhow!("broadcast read: {e}")),
+            }
+        }
+
+        // Stop ATMA cleanly: send a CR, then drain until the '>' prompt.
+        let _ = self.stream.write_all(b"\r").await;
+        let mut byte = [0u8; 1];
+        for _ in 0..200 {
+            match timeout(Duration::from_millis(50), self.stream.read(&mut byte)).await {
+                Ok(Ok(0)) => break,
+                Ok(Ok(_)) if byte[0] == b'>' => break,
+                Ok(Err(_)) | Err(_) => break,
+                _ => {}
+            }
+        }
+        let _ = self.send_cmd("ATCRA").await;
+
+        // Extract from the most recent payload seen for each CAN-ID.
+        let mut metrics: HashMap<String, f32> = HashMap::new();
+        let routed = route_broadcast_lines(&lines);
+        for frame in &spec.frames {
+            if let Some(payloads) = routed.get(&frame.can_id) {
+                if let Some(latest) = payloads.last() {
+                    for fld in &frame.fields {
+                        if let Some(v) = extract_value_broadcast(latest, fld) {
+                            metrics.insert(fld.name.clone(), v);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(metrics)
+    }
 }
 
 /// Strip ELM327 framing from a raw response string and return the UDS payload
-/// bytes (header + data). Mirrors the previous main.rs `get_payload`.
+/// bytes (header + data).
 pub fn get_payload(response: &str) -> Vec<u8> {
     let frames: Vec<&str> = response.split(|c| c == '\r' || c == '\n')
         .map(|s| s.trim())
@@ -285,13 +349,12 @@ where T: tokio::io::AsyncRead + Unpin,
     Ok(out)
 }
 
-/// ISO-TP / ELM327 multi-line reassembler. Faithful port of manio's
-/// read_uds_multiframe inner loop (canze-rs Zoe branch). The ELM327 (ATH0 +
-/// ATFCSM1) emits the reassembled response as lines: optionally a bare
-/// total-length line first, then data lines. Non-hex tokens (e.g. "0:" line
-/// counters, ">") are filtered out by the hex parse. First data line is taken
-/// wholesale (NO PCI strip); a genuine 0x2N consecutive frame has its sequence
-/// byte stripped. The UDS response header is NOT dropped here.
+/// Reassemble an ELM327 multi-line UDS response. With headers off and
+/// automatic flow control, the adapter emits an optional total-length line
+/// followed by data lines; non-hex tokens (line counters, the ">" prompt) are
+/// filtered out by the hex parse. The first data line is taken wholesale; a
+/// genuine 0x2N consecutive frame has its sequence byte stripped. The UDS
+/// response header is retained, matching the single-frame path.
 pub fn assemble_iso_tp(lines: &[Vec<u8>]) -> Option<Vec<u8>> {
     let mut payload: Vec<u8> = Vec::new();
     let mut expected_len: Option<usize> = None;
@@ -311,7 +374,7 @@ pub fn assemble_iso_tp(lines: &[Vec<u8>]) -> Option<Vec<u8>> {
                 // bare total-length header (e.g. ELM prints "012")
                 expected_len = Some(bytes[0] as usize);
             } else {
-                // first data line — taken wholesale (manio does NOT strip a PCI pair)
+                // first data line — taken wholesale (no PCI pair to strip)
                 expected_len = expected_len.or(Some(18));
                 payload.extend_from_slice(&bytes);
                 first_line = false;
@@ -330,7 +393,64 @@ pub fn assemble_iso_tp(lines: &[Vec<u8>]) -> Option<Vec<u8>> {
         }
     }
     if !got_data { return None; }
-    Some(payload) // NOTE: not truncated, header NOT dropped — matches manio
+    Some(payload) // header retained; the field extractor applies its own offset
+}
+
+/// Group ATMA lines by their leading CAN-ID hex token. Lines without a
+/// recognisable leading hex token (e.g. "ERROR", ">") are skipped. The CAN-ID
+/// token is consumed; the remaining hex tokens become the frame's data bytes.
+pub fn route_broadcast_lines(lines: &[String]) -> HashMap<String, Vec<Vec<u8>>> {
+    let mut out: HashMap<String, Vec<Vec<u8>>> = HashMap::new();
+    for line in lines {
+        let trimmed = line.trim();
+        if trimmed.is_empty() { continue; }
+        if trimmed.contains("ERROR") { continue; }
+
+        let mut parts = trimmed.split_whitespace();
+        let id = match parts.next() {
+            Some(s) if !s.is_empty() && s.chars().all(|c| c.is_ascii_hexdigit()) => s.to_string(),
+            _ => continue,
+        };
+        let bytes: Vec<u8> = parts
+            .filter_map(|t| u8::from_str_radix(t, 16).ok())
+            .collect();
+        if bytes.is_empty() { continue; }
+        out.entry(id).or_default().push(bytes);
+    }
+    out
+}
+
+/// Like extract_value but with raw byte offsets (broadcast CAN frames carry no
+/// UDS positive-response header, so there is no +3 skip).
+pub fn extract_value_broadcast(payload: &[u8], field: &FieldSpec) -> Option<f32> {
+    if let (Some(off), Some(len)) = (field.bit_offset, field.bit_length) {
+        return extract_bits(payload, off, len)
+            .map(|v| (v as f32) * field.multiplier + field.offset);
+    }
+    let bi = field.byte_index?;
+    let length = field.length?;
+    let idx = if bi < 0 {
+        let positive = payload.len() as i32 + bi;
+        if positive < 0 { return None; }
+        positive as usize
+    } else {
+        bi as usize
+    };
+    if idx + length > payload.len() { return None; }
+    let raw = if field.signed.unwrap_or(false) {
+        match length {
+            1 => payload[idx] as i8 as f32,
+            2 => i16::from_be_bytes([payload[idx], payload[idx + 1]]) as f32,
+            _ => return None,
+        }
+    } else {
+        match length {
+            1 => payload[idx] as f32,
+            2 => u16::from_be_bytes([payload[idx], payload[idx + 1]]) as f32,
+            _ => return None,
+        }
+    };
+    Some(raw * field.multiplier + field.offset)
 }
 
 #[cfg(test)]
@@ -479,6 +599,23 @@ mod tests {
     fn assemble_iso_tp_empty_returns_none() {
         let lines: Vec<Vec<u8>> = vec![];
         assert!(assemble_iso_tp(&lines).is_none());
+    }
+
+    #[test]
+    fn route_broadcast_lines_groups_by_can_id() {
+        // ATMA lines look like "673 11 22 33 44 55 66" — CAN-ID first, bytes after.
+        let lines: Vec<String> = vec![
+            "656 01 02 03 04 05 06 07".into(),
+            "673 11 22 33 44 55 66".into(),
+            "673 AA BB CC DD EE FF".into(),
+            "ERROR".into(),
+            "656 0A 0B 0C 0D 0E 0F 10".into(),
+        ];
+        let frames = route_broadcast_lines(&lines);
+        assert_eq!(frames.get("673").map(|v| v.len()), Some(2));
+        assert_eq!(frames.get("656").map(|v| v.len()), Some(2));
+        assert_eq!(frames["673"][0], vec![0x11, 0x22, 0x33, 0x44, 0x55, 0x66]);
+        assert_eq!(frames["656"][1], vec![0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10]);
     }
 
     #[tokio::test]

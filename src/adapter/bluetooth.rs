@@ -99,8 +99,11 @@ impl Adapter for BluetoothElm327Adapter {
                         }
                     }
                 }
-                Source::Broadcast(_) => {
-                    warn!("broadcast source not yet implemented; skipped");
+                Source::Broadcast(bc) => {
+                    match session.monitor_broadcast(bc).await {
+                        Ok(m) => metrics.extend(m),
+                        Err(e) => warn!("broadcast source failed: {e:#}"),
+                    }
                 }
             }
         }
