@@ -48,7 +48,7 @@ async fn main() -> anyhow::Result<()> {
     let profile = VehicleProfile::load(&car_model)?;
     info!("profile: {}", profile.name);
 
-    let adapter = BluetoothElm327Adapter::new(&mac, profile)?;
+    let adapter = BluetoothElm327Adapter::new(&mac, profile, cfg.device.bt_passkey)?;
     let publisher = Publisher::new(cfg.daemon.api_base_url.clone(), cfg.vehicle.battery_capacity_wh);
 
     let running = Arc::new(AtomicBool::new(true));

@@ -13,16 +13,22 @@ pub struct BluetoothElm327Adapter {
     target: SocketAddr,
     profile: VehicleProfile,
     session: Option<Elm327Session<Stream>>,
+    bt_passkey: Option<u32>,
+    bluer_session: Option<bluer::Session>,
+    _agent_handle: Option<bluer::agent::AgentHandle>,
 }
 
 impl BluetoothElm327Adapter {
-    pub fn new(mac: &str, profile: VehicleProfile) -> anyhow::Result<Self> {
+    pub fn new(mac: &str, profile: VehicleProfile, bt_passkey: Option<u32>) -> anyhow::Result<Self> {
         let addr: Address = mac.parse()
             .map_err(|_| anyhow!("invalid bluetooth MAC '{mac}'"))?;
         Ok(Self {
             target: SocketAddr::new(addr, 1u8),
             profile,
             session: None,
+            bt_passkey,
+            bluer_session: None,
+            _agent_handle: None,
         })
     }
 }
@@ -30,6 +36,14 @@ impl BluetoothElm327Adapter {
 #[async_trait]
 impl Adapter for BluetoothElm327Adapter {
     async fn connect(&mut self) -> Result<(), AdapterError> {
+        if let Some(pk) = self.bt_passkey {
+            let session = bluer::Session::new().await
+                .map_err(|e| AdapterError::FatalConn(anyhow!("bluer session: {e}")))?;
+            let handle = crate::adapter::pairing::register_passkey_agent(&session, pk).await
+                .map_err(AdapterError::FatalConn)?;
+            self.bluer_session = Some(session);
+            self._agent_handle = Some(handle);
+        }
         info!("Connecting to: {:?}", &self.target);
         let stream = Stream::connect(self.target).await
             .map_err(|e| AdapterError::FatalConn(anyhow!("BT connect failed: {e}")))?;
