@@ -4,115 +4,206 @@
 ![Hardware overview](images/aa-proxy-obd.webp)
 
 ## Description
-This small Linux tool connects to an EV's CAN bus over a Bluetooth ELM327 OBD-II adapter and forwards live vehicle telemetry (battery, odometer, tire pressure) to a local REST endpoint, designed to be consumed by [`aa-proxy-rs`](https://github.com/aa-proxy/aa-proxy-rs) for Android Auto EV routing and dashboards.<br>
+A single Linux daemon that reads live EV telemetry (battery, odometer, tire
+pressure, temperatures) and forwards it to a local REST consumer — designed for
+[`aa-proxy-rs`](https://github.com/aa-proxy/aa-proxy-rs) for Android Auto EV
+routing and dashboards. One binary serves three adapter families, selected at
+runtime by the config file:
 
-This repository is a fork of the original [`manio/canze-rs`](https://github.com/manio/canze-rs.git), generalised beyond the Renault Zoe into a multi-vehicle telemetry daemon driven by JSON profiles.
-The name of the original project is inspired by (and a tribute to) the great [CanZE](https://canze.fisch.lu/) project.
+| Adapter type | `device.type` | How it talks to the car |
+|---|---|---|
+| Bluetooth ELM327 dongle | `bluetooth` | Bluetooth RFCOMM, ELM327 AT commands |
+| USB ELM327 dongle       | `usb`       | USB serial, ELM327 AT commands       |
+| WiCAN Pro               | `wican`     | BLE GATT, WiCAN AutoPid JSON          |
 
-> **Note:** this project was previously known as `canze-rs` and has since been adopted into the [`aa-proxy`](https://github.com/aa-proxy/) organization as a companion to `aa-proxy-rs`. Its new home is [`aa-proxy/aa-proxy-obd`](https://github.com/aa-proxy/aa-proxy-obd).
+> **Heritage:** aa-proxy-obd was previously known as `canze-rs` and forked from
+> [`manio/canze-rs`](https://github.com/manio/canze-rs.git) — the original
+> Renault Zoe SOC logger, whose full Zoe support (TPMS, odometer, energy) lives
+> on as the `zoe` profile. The name is a tribute to the
+> [CanZE](https://canze.fisch.lu/) project, which remains the reference for the
+> underlying PIDs. Its home is
+> [`aa-proxy/aa-proxy-obd`](https://github.com/aa-proxy/aa-proxy-obd).
 
-## Supported vehicles
+## Supported vehicles (ELM327 profiles)
+
 | Vehicle | Profile | SOC | Battery (Wh) | External temp | Odometer | Tire pressure |
 |---|---|:---:|:---:|:---:|:---:|:---:|
-| Renault Zoe | `zoe` | ✅ |  |  |  |  |
+| Renault Zoe     | `zoe`    | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Hyundai Ioniq 5 | `ioniq5` | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Kia EV6 | `ev6` | ✅ | ✅ | ✅ | ✅ | ✅ |
-| MG4 | `mg4` | ✅ |  | ✅ |  |  |
-| Kia Niro | `niro` | ✅ |  |  |  |  |
+| Kia EV6         | `ev6`    | ✅ | ✅ | ✅ | ✅ | ✅ |
+| MG4             | `mg4`    | ✅ |    | ✅ |    |    |
+| Kia Niro        | `niro`   | ✅ |    |    |    |    |
 
-Adding a new vehicle requires no Rust changes — see [Adding a vehicle profile](#adding-a-vehicle-profile) below.
+Adding a new vehicle requires no Rust changes — see [Vehicle profiles](#vehicle-profiles).
+
+WiCAN Pro users get whatever their AutoPid configuration exposes (typically SOC
+plus outdoor temperature); the WiCAN firmware decodes PIDs itself, so the daemon
+does not load a `profiles/` file for `device.type = "wican"`.
 
 ## What it transmits
-aa-proxy-obd runs as a long-lived daemon. While the car's OBD dongle is in range and the car is awake (charging or driving), it polls the PIDs declared by the active profile and `POST`s the readings as JSON to three endpoints on `localhost`:
+While the adapter is reachable and the car is awake, the daemon polls and
+`POST`s JSON to three endpoints on `localhost`. For each endpoint, it sends only
+if at least one relevant field was produced this cycle (absent fields are
+omitted); otherwise the endpoint is silently skipped.
 
 | Endpoint | Payload |
 |---|---|
-| `POST http://localhost/battery` | `battery_level_percentage`, `battery_level_wh`, `battery_capacity_wh`, `external_temp_celsius` (all optional) |
-| `POST http://localhost/odometer` | `odometer_km`, `trip_km` (optional) |
-| `POST http://localhost/tire-pressure` | `pressures_kpa[]` |
+| `POST {api_base}/battery` | `battery_level_percentage`, `battery_level_wh`, `battery_capacity_wh`, `external_temp_celsius`, `battery_state_of_health`, `battery_voltage`, `battery_current`, `interior_temp_celsius` (all optional) |
+| `POST {api_base}/odometer` | `odometer_km`, `trip_km` (optional) |
+| `POST {api_base}/tire-pressure` | `pressures_kpa[]` (FL, FR, RL, RR) |
 
-Only fields whose PIDs are declared in the active profile are populated; the rest are omitted from the JSON. If the profile reports SOC as a percentage and the config provides `battery_capacity_wh`, aa-proxy-obd derives `battery_level_wh` automatically.
+If the active profile reports SOC as a percentage and `battery_capacity_wh` is
+set in config, the daemon derives `battery_level_wh = SOC × capacity / 100`
+automatically when the profile doesn't report Wh directly.
 
 ## Usage
 ```
-aa-proxy-obd 0.2.0
+aa-proxy-obd [OPTIONS] [COMMAND]
 
-USAGE:
-    aa-proxy-obd [OPTIONS]
+Commands:
+  pair    Pair the configured Bluetooth/WiCAN device (and optionally save the passkey)
 
-OPTIONS:
-    -c, --config <CONFIG>    Config file path [default: /etc/aa-proxy-obd.conf]
-    -d, --debug              Enable debug info
-    -h, --help               Print help information
-    -V, --version            Print version information
+Options:
+  -c, --config <CONFIG>    Config file path [default: /etc/aa-proxy-obd.toml]
+  -d, --debug              Override the configured log level to debug
+  -h, --help               Print help
+  -V, --version            Print version
 ```
 
-## Config
-The daemon reads its configuration from `/etc/aa-proxy-obd.conf`:
+## Config — `/etc/aa-proxy-obd.toml`
+```toml
+[device]
+type        = "bluetooth"        # bluetooth | usb | wican
 
-```
-[general]
-mac                  = 00:00:00:00:00:00  # Bluetooth OBD-II dongle MAC
-car                  = ev6                # profile name; loaded from /etc/aa-proxy-obd/<car>.json
-battery_capacity_wh  = 77400              # optional; enables derived battery_level_wh from SOC %
-```
+bt_mac      = "AA:BB:CC:DD:EE:FF"
+bt_passkey  = 1234               # optional; enables in-process pairing
 
-| Key | Required | Description |
-|---|:---:|---|
-| `mac` | yes | MAC address of the Bluetooth ELM327 dongle paired to the host. |
-| `car` | yes | Profile name. aa-proxy-obd loads `/etc/aa-proxy-obd/<car>.json` at startup. |
-| `battery_capacity_wh` | no | Usable pack capacity in watt-hours. When set, aa-proxy-obd computes `battery_level_wh = SOC × battery_capacity_wh` and forwards it to `/battery`. |
+usb_port    = "/dev/ttyUSB0"
+usb_baud    = 115200
+
+wican_mac                 = "11:22:33:44:55:66"
+wican_passkey             = 123456
+wican_max_connect_retries = 5
+wican_timeout_secs        = 10
+
+[vehicle]
+profile             = "ev6"      # ignored when device.type = "wican"
+battery_capacity_wh = 77400      # optional; enables derived battery_level_wh
+
+[daemon]
+poll_interval_secs        = 10
+car_sleep_interval_secs   = 100      # poll interval while the car is asleep
+log_level                 = "info"   # off | error | warn | info | debug | trace
+log_file                  = "/var/log/aa-proxy-obd.log"
+api_base_url              = "http://localhost"
+bridge_dropouts           = true
+publish_failure_threshold = 5
+publish_breaker_secs      = 300
+cycle_failure_limit       = 20
+```
+Keys under `[device]` that don't apply to the selected `type` are ignored. All
+`[daemon]` keys have the defaults shown; override only what you need.
 
 ## Vehicle profiles
-Profile JSONs ship in this repo under [`profiles/`](profiles/). At install time they need to be copied to `/etc/aa-proxy-obd/<name>.json` (e.g. `profiles/ev6.json` → `/etc/aa-proxy-obd/ev6.json`).
+Profile JSON files ship under [`profiles/`](profiles/). At install time, copy
+them to `/etc/aa-proxy-obd/<profile>.json` (e.g. `profiles/ev6.json` →
+`/etc/aa-proxy-obd/ev6.json`). A profile lists one or more `sources`, each with
+a `kind` discriminator.
 
-### Profile schema
+### `uds_pid` source — active request/response
 ```jsonc
 {
-  "name": "Hyundai Ioniq 5",       // display name (logged at startup)
-  "pids": [
-    {
-      "ecu_tx": "7E4",             // request header
-      "ecu_rx": "7EC",             // response filter
-      "pid":    "220105",          // service+PID bytes (UDS / Mode 22 typical)
-      "fields": [
-        {
-          "name":       "battery_level_percentage",
-          "byte_index": 31,        // offset into the response payload; negative = from end
-          "length":     1,         // bytes (1, 2 or 3)
-          "multiplier": 0.5,       // raw * multiplier ...
-          "offset":     0.0        // ... + offset = final value
-        }
-      ]
-    }
+  "kind": "uds_pid",
+  "ecu_tx": "7E4",          // request header
+  "ecu_rx": "7EC",          // response filter
+  "pid": "220105",          // service + PID (UDS / Mode 22 typical)
+  "pre_request": "10C0",    // optional; sent before the PID, errors ignored
+  "multiframe": false,       // opt-in to ISO-TP flow-control reassembly
+  "fields": [ /* FieldSpec */ ]
+}
+```
+
+### `broadcast` source — passive ATMA monitor
+```jsonc
+{
+  "kind": "broadcast",
+  "init": ["ATCRA", "ATH1", "ATS1"],
+  "command": "ATMA",
+  "deadline_ms": 6000,
+  "idle_timeout_ms": 600,
+  "stop_when": ["external_temp_celsius"],   // field names that end the scan early
+  "frames": [
+    { "can_id": "673", "fields": [ /* FieldSpec */ ] }
   ]
 }
 ```
 
-Fields whose `name` is recognised by aa-proxy-obd are aggregated into the appropriate `POST`. Recognised names today:
+### `FieldSpec`
+| Key | Type | Required | Behaviour |
+|---|---|:---:|---|
+| `name` | string | yes | Recognised names route into a known endpoint payload; unknown names are logged but not POSTed. |
+| `byte_index` | int | one of byte/bit | **`uds_pid`:** offset from after the UDS header (e.g. `62 XX XX`), so 0 = first data byte; negative counts from the end. **`broadcast`:** offset from the start of the CAN data bytes (no header). |
+| `length` | usize | with `byte_index` | 1, 2, or 3 bytes |
+| `bit_offset` | int | one of byte/bit | Motorola/big-endian bit index (bit 0 = MSB of byte 0) |
+| `bit_length` | usize | with `bit_offset` | 1..=16 |
+| `multiplier` | f32 | yes (default 1.0) | `raw × multiplier + offset` |
+| `offset` | f32 | yes (default 0.0) | as above |
+| `signed` | bool | optional | byte extraction only; sign-extend before scaling |
 
-- **Battery** — `battery_level_percentage`, `battery_level_wh`, `external_temp_celsius`
-- **Odometer** — `odometer_km`, `trip_km`
-- **Tire pressure** — `tire_fl_kpa`, `tire_fr_kpa`, `tire_rl_kpa`, `tire_rr_kpa`
+### Recognised field names
+- **Battery:** `battery_level_percentage`, `battery_level_wh`, `external_temp_celsius`, `battery_state_of_health`, `battery_voltage`, `battery_current`, `interior_temp_celsius`
+- **Odometer:** `odometer_km`, `trip_km`
+- **Tire pressure:** `tire_fl_kpa`, `tire_fr_kpa`, `tire_rl_kpa`, `tire_rr_kpa`
 
 ### Adding a vehicle profile
-1. Identify the OBD ECU TX/RX headers and the Mode 22 PID(s) for the parameters you want. The [CanZE](https://canze.fisch.lu/) project is an excellent reference.
-2. Determine the byte offset, length, multiplier, and offset for each field within the response payload.
+1. Identify the OBD ECU TX/RX headers and the PID(s) for the parameters you want. [CanZE](https://canze.fisch.lu/) is an excellent reference.
+2. Work out each field's byte (or bit) offset, length, multiplier, and offset within the response payload.
 3. Drop a new JSON file under `profiles/` (and copy it to `/etc/aa-proxy-obd/<name>.json`).
-4. Point `car = <name>` at it in `/etc/aa-proxy-obd.conf`.
+4. Point `profile = <name>` at it in the config. No code changes required.
 
-No code changes required.
+## Bluetooth pairing
+If `[device].bt_passkey` (or `wican_passkey` for WiCAN) is set, the daemon
+registers a BlueZ agent at connect time that supplies the passkey during first
+pairing. BlueZ ignores the agent for already-paired devices.
+
+For one-shot setup:
+```sh
+aa-proxy-obd pair --passkey 1234     # or omit --passkey to be prompted
+```
+The subcommand discovers the device (if not already known to BlueZ), pairs it,
+and on success offers to write the passkey back into the config under the
+appropriate `[device]` key. Config comments and formatting are preserved.
+
+## Failure handling
+- **Per-endpoint circuit breaker.** After `publish_failure_threshold` consecutive
+  POST failures on an endpoint (default 5), the daemon stops POSTing there for
+  `publish_breaker_secs` (default 300s), then probes once and closes on success.
+- **`bridge_dropouts`.** When enabled (default), if a cycle produces no payload
+  for an endpoint but the previous one did, the daemon re-POSTs the last-good
+  value so downstream sees continuity. The cache clears when the car sleeps.
+- **Cycle health watchdog.** If `cycle_failure_limit` consecutive cycles produce
+  zero successful POSTs (excluding intentional sleep cycles), the daemon logs an
+  error and exits code 2 for a supervisor to act on.
+
+| Exit code | Meaning |
+|---|---|
+| 0 | Clean shutdown on SIGINT / SIGTERM |
+| 1 | Startup error — invalid config, missing profile, unparseable MAC |
+| 2 | Cycle health watchdog tripped |
 
 ## Building
-```
+```sh
 cargo build --release
 ```
-
-For embedded / Buildroot integration, this repo includes a vendored cargo configuration that pins crate sources to a local `VENDOR/` directory — see [`.cargo/config.toml`](.cargo/config.toml). Populate `VENDOR/` with `cargo vendor` (online), then build offline.
+The vendored [`.cargo/config.toml`](.cargo/config.toml) defaults the target to
+`aarch64-unknown-linux-gnu` so the release build cross-compiles for common SBCs
+(e.g. Radxa Zero 3W running an aa-proxy-rs image). Run the test suite on the
+host with `cargo test --target <host-triple>`.
 
 ## License
 GPL-2.0. See [`LICENSE`](LICENSE).
 
 ## Credits
-- Original [`manio/canze-rs`](https://github.com/manio/canze-rs.git) by Mariusz Białończyk — the Renault Zoe SOC logger this fork started from.
-- The [CanZE](https://canze.fisch.lu/) project.
+- Original [`manio/canze-rs`](https://github.com/manio/canze-rs.git) by Mariusz Białończyk — the Renault Zoe SOC logger and TPMS/multiframe work this fork builds on.
+- The [CanZE](https://canze.fisch.lu/) project — primary reference for OBD PIDs.
+- Reference projects whose capabilities this daemon absorbs: `aa-proxy-go-obd-feeder` (USB OBD) and `aa-proxy-wican` (WiCAN Pro).
