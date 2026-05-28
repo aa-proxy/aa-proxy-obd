@@ -97,6 +97,7 @@ async fn main() -> anyhow::Result<()> {
         cfg.vehicle.battery_capacity_wh,
         cfg.daemon.publish_failure_threshold,
         cfg.daemon.publish_breaker_secs,
+        cfg.daemon.bridge_dropouts,
     );
 
     let running = Arc::new(AtomicBool::new(true));

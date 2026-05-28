@@ -77,6 +77,7 @@ pub async fn run(
                 }
                 Err(AdapterError::Sleeping) => {
                     info!("car asleep; long-poll {:?}", sleep_interval);
+                    publisher.on_sleeping().await;
                     no_publish_cycles = 0;
                     poll_deadline = Instant::now() + sleep_interval;
                 }

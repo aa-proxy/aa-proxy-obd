@@ -66,11 +66,30 @@ pub struct TirePressureData {
     pub pressures_kpa: Vec<f32>,
 }
 
+#[derive(Default, Clone)]
+pub struct PublishCache {
+    battery:        Option<BatteryData>,
+    odometer:       Option<OdometerData>,
+    tire_pressure:  Option<TirePressureData>,
+}
+
+impl PublishCache {
+    pub fn last_battery(&self)       -> Option<&BatteryData>      { self.battery.as_ref() }
+    pub fn last_odometer(&self)      -> Option<&OdometerData>     { self.odometer.as_ref() }
+    pub fn last_tire_pressure(&self) -> Option<&TirePressureData> { self.tire_pressure.as_ref() }
+    pub fn store_battery(&mut self, b: BatteryData)            { self.battery = Some(b); }
+    pub fn store_odometer(&mut self, o: OdometerData)          { self.odometer = Some(o); }
+    pub fn store_tire_pressure(&mut self, t: TirePressureData) { self.tire_pressure = Some(t); }
+    pub fn clear(&mut self) { *self = PublishCache::default(); }
+}
+
 pub struct Publisher {
     client: Client,
     api_base: String,
     capacity_wh: Option<u32>,
     breakers: tokio::sync::Mutex<Breakers>,
+    cache: tokio::sync::Mutex<PublishCache>,
+    bridge_dropouts: bool,
 }
 
 struct Breakers {
@@ -85,6 +104,7 @@ impl Publisher {
         capacity_wh: Option<u32>,
         threshold: u32,
         breaker_secs: u64,
+        bridge_dropouts: bool,
     ) -> Self {
         let dur = Duration::from_secs(breaker_secs);
         Self {
@@ -96,7 +116,14 @@ impl Publisher {
                 odometer:      CircuitBreaker::new(threshold, dur),
                 tire_pressure: CircuitBreaker::new(threshold, dur),
             }),
+            cache: tokio::sync::Mutex::new(PublishCache::default()),
+            bridge_dropouts,
         }
+    }
+
+    /// Called by the scheduler on AdapterError::Sleeping — drop stale telemetry.
+    pub async fn on_sleeping(&self) {
+        self.cache.lock().await.clear();
     }
 
     pub fn build_battery(&self, m: &Metrics) -> Option<BatteryData> {
@@ -144,15 +171,43 @@ impl Publisher {
     /// Publish all three endpoints. Returns true if at least one POST succeeded.
     pub async fn publish(&self, m: &Metrics) -> bool {
         let mut any_ok = false;
-        if let Some(data) = self.build_battery(m) {
-            if self.attempt_battery(&data).await { any_ok = true; }
+
+        let payload = match self.build_battery(m) {
+            Some(b) => Some(b),
+            None if self.bridge_dropouts => self.cache.lock().await.last_battery().cloned(),
+            None => None,
+        };
+        if let Some(b) = payload {
+            if self.attempt_battery(&b).await {
+                any_ok = true;
+                self.cache.lock().await.store_battery(b);
+            }
         }
-        if let Some(data) = self.build_odometer(m) {
-            if self.attempt_odometer(&data).await { any_ok = true; }
+
+        let payload = match self.build_odometer(m) {
+            Some(o) => Some(o),
+            None if self.bridge_dropouts => self.cache.lock().await.last_odometer().cloned(),
+            None => None,
+        };
+        if let Some(o) = payload {
+            if self.attempt_odometer(&o).await {
+                any_ok = true;
+                self.cache.lock().await.store_odometer(o);
+            }
         }
-        if let Some(data) = self.build_tire_pressure(m) {
-            if self.attempt_tire_pressure(&data).await { any_ok = true; }
+
+        let payload = match self.build_tire_pressure(m) {
+            Some(t) => Some(t),
+            None if self.bridge_dropouts => self.cache.lock().await.last_tire_pressure().cloned(),
+            None => None,
+        };
+        if let Some(t) = payload {
+            if self.attempt_tire_pressure(&t).await {
+                any_ok = true;
+                self.cache.lock().await.store_tire_pressure(t);
+            }
         }
+
         any_ok
     }
 
@@ -233,14 +288,14 @@ mod tests {
 
     #[test]
     fn build_battery_omits_when_no_relevant_fields() {
-        let p = Publisher::new("http://test", None, 5, 300);
+        let p = Publisher::new("http://test", None, 5, 300, true);
         assert!(p.build_battery(&Metrics::new()).is_none());
         assert!(p.build_battery(&metrics_with(&[("odometer_km", 12345.0)])).is_none());
     }
 
     #[test]
     fn build_battery_derives_level_wh_from_soc_and_capacity() {
-        let p = Publisher::new("http://test", Some(80000), 5, 300);
+        let p = Publisher::new("http://test", Some(80000), 5, 300, true);
         let m = metrics_with(&[("battery_level_percentage", 50.0)]);
         let d = p.build_battery(&m).unwrap();
         assert_eq!(d.battery_level_percentage, Some(50.0));
@@ -250,7 +305,7 @@ mod tests {
 
     #[test]
     fn build_battery_prefers_explicit_level_wh_over_derived() {
-        let p = Publisher::new("http://test", Some(80000), 5, 300);
+        let p = Publisher::new("http://test", Some(80000), 5, 300, true);
         let m = metrics_with(&[
             ("battery_level_percentage", 50.0),
             ("battery_level_wh", 12345.0),
@@ -261,7 +316,7 @@ mod tests {
 
     #[test]
     fn build_odometer_present_only_when_field_present() {
-        let p = Publisher::new("http://test", None, 5, 300);
+        let p = Publisher::new("http://test", None, 5, 300, true);
         assert!(p.build_odometer(&Metrics::new()).is_none());
         let m = metrics_with(&[("odometer_km", 12345.0)]);
         let d = p.build_odometer(&m).unwrap();
@@ -270,7 +325,7 @@ mod tests {
 
     #[test]
     fn build_tire_pressure_requires_fl() {
-        let p = Publisher::new("http://test", None, 5, 300);
+        let p = Publisher::new("http://test", None, 5, 300, true);
         let m = metrics_with(&[("tire_fr_kpa", 200.0)]);
         assert!(p.build_tire_pressure(&m).is_none());
 
@@ -287,7 +342,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(200))
             .mount(&server).await;
 
-        let p = Publisher::new(server.uri(), Some(80000), 5, 300);
+        let p = Publisher::new(server.uri(), Some(80000), 5, 300, true);
         let m = metrics_with(&[("battery_level_percentage", 50.0)]);
         let ok = p.publish(&m).await;
         assert!(ok, "expected /battery POST to succeed");
@@ -301,11 +356,57 @@ mod tests {
             .respond_with(ResponseTemplate::new(500))
             .mount(&server).await;
 
-        let p = Publisher::new(server.uri(), Some(80000), 3, 60);
+        let p = Publisher::new(server.uri(), Some(80000), 3, 60, true);
         let m = metrics_with(&[("battery_level_percentage", 50.0)]);
         for _ in 0..3 { assert!(!p.publish(&m).await); } // 3 failures open the breaker
         assert!(!p.publish(&m).await);                    // open -> no POST
         let total = server.received_requests().await.unwrap().len();
         assert_eq!(total, 3, "publish should not POST after the circuit opens");
+    }
+
+    #[test]
+    fn cache_remembers_last_good_payload() {
+        let mut c = PublishCache::default();
+        let bd = BatteryData { battery_level_percentage: Some(50.0), ..Default::default() };
+        c.store_battery(bd.clone());
+        assert!(matches!(c.last_battery(), Some(b) if b.battery_level_percentage == Some(50.0)));
+    }
+
+    #[test]
+    fn cache_clear_wipes_everything() {
+        let mut c = PublishCache::default();
+        c.store_battery(BatteryData { battery_level_percentage: Some(50.0), ..Default::default() });
+        c.store_odometer(OdometerData { odometer_km: 12345.0, trip_km: None });
+        c.clear();
+        assert!(c.last_battery().is_none());
+        assert!(c.last_odometer().is_none());
+    }
+
+    #[tokio::test]
+    async fn bridge_dropouts_reposts_cached_battery() {
+        use wiremock::{matchers::{method, path}, Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/battery"))
+            .respond_with(ResponseTemplate::new(200)).mount(&server).await;
+
+        let p = Publisher::new(server.uri(), Some(80000), 5, 300, true);
+        let m = metrics_with(&[("battery_level_percentage", 50.0)]);
+        assert!(p.publish(&m).await);              // real data: POST + cache
+        assert!(p.publish(&Metrics::new()).await); // empty: cache replay -> POST
+        assert_eq!(server.received_requests().await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn bridge_dropouts_off_means_silent_no_data_cycle() {
+        use wiremock::{matchers::{method, path}, Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/battery"))
+            .respond_with(ResponseTemplate::new(200)).mount(&server).await;
+
+        let p = Publisher::new(server.uri(), Some(80000), 5, 300, false);
+        let m = metrics_with(&[("battery_level_percentage", 50.0)]);
+        assert!(p.publish(&m).await);
+        assert!(!p.publish(&Metrics::new()).await); // no replay
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
     }
 }
