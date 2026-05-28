@@ -143,9 +143,10 @@ where
         let _ = self.send_cmd("ATS1").await;
         let _ = self.send_cmd("ATCRA").await;
 
-        let payload = assemble_iso_tp(&lines).ok_or_else(|| anyhow!("multiframe assembly failed"))?;
-        // Drop the UDS positive-response header (e.g. 62 01 05).
-        if payload.len() >= 3 { Ok(payload[3..].to_vec()) } else { Ok(payload) }
+        // Return the header-inclusive payload — same convention as the
+        // single-frame poll_uds_pid (get_payload also keeps the header). The
+        // extract_value byte branch applies its +3 header skip consistently.
+        assemble_iso_tp(&lines).ok_or_else(|| anyhow!("multiframe assembly failed"))
     }
 }
 
@@ -284,16 +285,18 @@ where T: tokio::io::AsyncRead + Unpin,
     Ok(out)
 }
 
-/// Pure-function ISO-TP assembler. Input: hex-ascii lines, each token = one byte
-/// (space-separated). First frame is PCI 0x1L LL <data...>; consecutive frames
-/// are 0x2N <data...>. Returns the assembled payload truncated to the declared
-/// length. Mirrors manio's read_uds_multiframe inner loop without the I/O.
+/// ISO-TP / ELM327 multi-line reassembler. Faithful port of manio's
+/// read_uds_multiframe inner loop (canze-rs Zoe branch). The ELM327 (ATH0 +
+/// ATFCSM1) emits the reassembled response as lines: optionally a bare
+/// total-length line first, then data lines. Non-hex tokens (e.g. "0:" line
+/// counters, ">") are filtered out by the hex parse. First data line is taken
+/// wholesale (NO PCI strip); a genuine 0x2N consecutive frame has its sequence
+/// byte stripped. The UDS response header is NOT dropped here.
 pub fn assemble_iso_tp(lines: &[Vec<u8>]) -> Option<Vec<u8>> {
-    if lines.is_empty() { return None; }
-
     let mut payload: Vec<u8> = Vec::new();
     let mut expected_len: Option<usize> = None;
     let mut first_line = true;
+    let mut got_data = false;
 
     for line in lines {
         let ascii = String::from_utf8_lossy(line);
@@ -304,28 +307,30 @@ pub fn assemble_iso_tp(lines: &[Vec<u8>]) -> Option<Vec<u8>> {
         if bytes.is_empty() { continue; }
 
         if first_line {
-            // First frame: 10 LL D1 D2 ...
-            if (bytes[0] & 0xF0) != 0x10 { return None; }
-            if bytes.len() < 2 { return None; }
-            expected_len = Some(bytes[1] as usize);
-            payload.extend_from_slice(&bytes[2..]);
-            first_line = false;
+            if bytes.len() == 1 {
+                // bare total-length header (e.g. ELM prints "012")
+                expected_len = Some(bytes[0] as usize);
+            } else {
+                // first data line — taken wholesale (manio does NOT strip a PCI pair)
+                expected_len = expected_len.or(Some(18));
+                payload.extend_from_slice(&bytes);
+                first_line = false;
+                got_data = true;
+            }
         } else {
-            // Consecutive frame: 2N D1 D2 ...
-            if (bytes[0] & 0xF0) == 0x20 {
+            // consecutive frame: strip the 0x2N sequence byte if present
+            if bytes.len() > 1 && (bytes[0] & 0xF0) == 0x20 {
                 payload.extend_from_slice(&bytes[1..]);
             } else {
                 payload.extend_from_slice(&bytes);
             }
         }
         if let Some(exp) = expected_len {
-            if payload.len() >= exp {
-                payload.truncate(exp);
-                break;
-            }
+            if got_data && payload.len() >= exp { break; }
         }
     }
-    expected_len.map(|exp| { payload.truncate(exp); payload })
+    if !got_data { return None; }
+    Some(payload) // NOTE: not truncated, header NOT dropped — matches manio
 }
 
 #[cfg(test)]
@@ -443,20 +448,36 @@ mod tests {
     }
 
     #[test]
-    fn assemble_iso_tp_first_and_consecutive_frames() {
-        // First frame:  10 0A 61 04 11 22 33 44 (length=0x0A=10 bytes)
-        // Consecutive: 21 55 66 77 88 99 AA
+    fn assemble_iso_tp_bare_length_then_data() {
+        // ELM prints total length on its own line, then reassembled data lines.
         let lines = vec![
-            b"10 0A 61 04 11 22 33 44".to_vec(),
-            b"21 55 66 77 88 99 AA".to_vec(),
+            b"012".to_vec(),                  // length = 0x12 = 18
+            b"61 74 00 01 02 03 04".to_vec(), // first data line, taken wholesale
+            b"05 06 07 08 09 0A 0B".to_vec(),
+            b"0C 0D 0E 0F 10 11 12".to_vec(),
         ];
         let p = assemble_iso_tp(&lines).expect("payload");
-        assert_eq!(p, vec![0x61, 0x04, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88]);
+        assert_eq!(&p[0..2], &[0x61, 0x74]); // header preserved (no PCI strip / no drop)
+        assert!(p.len() >= 18);
+        // accumulation order sanity: line2 = idx0..6, line3 = idx7..13,
+        // line4 = idx14..20, so idx14 is the first byte of line4 (0x0C).
+        assert_eq!(p[14], 0x0C);
     }
 
     #[test]
-    fn assemble_iso_tp_rejects_no_first_frame() {
-        let lines = vec![b"21 22 33".to_vec()];
+    fn assemble_iso_tp_strips_consecutive_pci_nibble() {
+        let lines = vec![
+            b"10 0A 61 74 11 22 33 44".to_vec(), // first line wholesale (incl 10 0A)
+            b"21 55 66 77 88 99 AA".to_vec(),     // 0x2N consecutive -> strip seq byte
+        ];
+        let p = assemble_iso_tp(&lines).expect("payload");
+        assert_eq!(&p[0..4], &[0x10, 0x0A, 0x61, 0x74]);
+        assert_eq!(&p[8..14], &[0x55, 0x66, 0x77, 0x88, 0x99, 0xAA]);
+    }
+
+    #[test]
+    fn assemble_iso_tp_empty_returns_none() {
+        let lines: Vec<Vec<u8>> = vec![];
         assert!(assemble_iso_tp(&lines).is_none());
     }
 
