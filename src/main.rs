@@ -6,6 +6,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 mod adapter;
+mod cli {
+    pub mod pair;
+}
 mod config;
 mod logging;
 mod output;
@@ -20,14 +23,32 @@ use crate::profile::VehicleProfile;
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
+    #[command(subcommand)]
+    command: Option<Commands>,
+
     #[arg(short, long)] debug: bool,
     #[arg(short, long, default_value = "/etc/aa-proxy-obd.toml")] config: PathBuf,
+}
+
+#[derive(clap::Subcommand, Debug)]
+enum Commands {
+    /// Pair the configured Bluetooth device and optionally save the passkey.
+    Pair {
+        /// Passkey to provide during pairing. If omitted, prompts on stdin.
+        #[arg(long)]
+        passkey: Option<u32>,
+    },
 }
 
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+
+    if let Some(Commands::Pair { passkey }) = &args.command {
+        logging::init("info", "/dev/null", args.debug);
+        return cli::pair::run(&args.config, *passkey).await;
+    }
 
     let cfg = match Config::load(&args.config) {
         Ok(c) => c,
