@@ -127,9 +127,36 @@ pub fn get_payload(response: &str) -> Vec<u8> {
     payload
 }
 
-/// Extract an f32 from a UDS payload according to a FieldSpec. Byte-aligned
-/// extraction only (bit extraction arrives in a later task).
+/// Extract a packed value using Motorola/big-endian bit numbering — bit 0 is
+/// the MSB of byte 0. bit_length is 1..=16. Reads contiguously across bytes.
+fn extract_bits(payload: &[u8], bit_offset: u32, bit_length: u32) -> Option<u32> {
+    if bit_length == 0 || bit_length > 16 { return None; }
+    let last_bit = bit_offset + bit_length;
+    let needed_bytes = ((last_bit + 7) / 8) as usize;
+    if needed_bytes > payload.len() { return None; }
+
+    let mut acc: u32 = 0;
+    for i in 0..bit_length {
+        let abs_bit = bit_offset + i;
+        let byte = payload[(abs_bit / 8) as usize];
+        let bit_in_byte = 7 - (abs_bit % 8); // bit 0 = MSB
+        let bit = (byte >> bit_in_byte) & 1;
+        acc = (acc << 1) | bit as u32;
+    }
+    Some(acc)
+}
+
+/// Extract an f32 from a UDS payload according to a FieldSpec. Bit-aligned
+/// extraction is tried first (when bit_offset + bit_length are set); otherwise
+/// falls back to byte-aligned extraction.
 pub fn extract_value(payload: &[u8], field: &FieldSpec) -> Option<f32> {
+    // Bit branch first — explicit opt-in via bit_offset+bit_length.
+    if let (Some(bit_off), Some(bit_len)) = (field.bit_offset, field.bit_length) {
+        return extract_bits(payload, bit_off, bit_len)
+            .map(|v| (v as f32) * field.multiplier + field.offset);
+    }
+
+    // Byte branch (unchanged):
     let byte_index = field.byte_index?;
     let length     = field.length?;
     let idx = if byte_index < 0 {
@@ -230,6 +257,56 @@ mod tests {
         let raw = "014\r0:62010511 22 33\r\n>";
         let p = get_payload(raw);
         assert_eq!(p, vec![0x62, 0x01, 0x05, 0x11, 0x22, 0x33]);
+    }
+
+    // Motorola bit numbering: bit 0 = MSB of byte 0.
+    //   byte 0 = 0xA5 = 1010_0101 — bits 0..7
+    //   byte 1 = 0x3C = 0011_1100 — bits 8..15
+
+    #[test]
+    fn extract_single_bit_msb() {
+        let p = vec![0xA5, 0x3C, 0xFF, 0x00];
+        let f = FieldSpec {
+            name: "x".into(), byte_index: None, length: None,
+            bit_offset: Some(0), bit_length: Some(1),
+            multiplier: 1.0, offset: 0.0, signed: None,
+        };
+        assert_eq!(extract_value(&p, &f), Some(1.0));
+    }
+
+    #[test]
+    fn extract_three_bit_value_spanning_byte_boundary() {
+        // bits 6..8 of 0xA5 0x3C: byte0 last two bits = 01, byte1 first bit = 0 -> 010 = 2
+        let p = vec![0xA5, 0x3C];
+        let f = FieldSpec {
+            name: "x".into(), byte_index: None, length: None,
+            bit_offset: Some(6), bit_length: Some(3),
+            multiplier: 1.0, offset: 0.0, signed: None,
+        };
+        assert_eq!(extract_value(&p, &f), Some(2.0));
+    }
+
+    #[test]
+    fn extract_full_byte_via_bit_field() {
+        // bits 8..15 of 0xA5 0x3C = 0x3C = 60
+        let p = vec![0xA5, 0x3C];
+        let f = FieldSpec {
+            name: "x".into(), byte_index: None, length: None,
+            bit_offset: Some(8), bit_length: Some(8),
+            multiplier: 1.0, offset: 0.0, signed: None,
+        };
+        assert_eq!(extract_value(&p, &f), Some(60.0));
+    }
+
+    #[test]
+    fn extract_bit_out_of_range_returns_none() {
+        let p = vec![0xFF, 0xFF];
+        let f = FieldSpec {
+            name: "x".into(), byte_index: None, length: None,
+            bit_offset: Some(20), bit_length: Some(4),
+            multiplier: 1.0, offset: 0.0, signed: None,
+        };
+        assert_eq!(extract_value(&p, &f), None);
     }
 
     #[tokio::test]
