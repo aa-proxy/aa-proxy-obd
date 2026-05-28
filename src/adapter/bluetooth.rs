@@ -68,8 +68,13 @@ impl Adapter for BluetoothElm327Adapter {
         for source in &self.profile.sources {
             match source {
                 Source::UdsPid(uds) => {
-                    debug!("Polling PID {}", uds.pid);
-                    match session.poll_uds_pid(uds).await {
+                    debug!("Polling PID {} (multiframe={})", uds.pid, uds.multiframe);
+                    let result = if uds.multiframe {
+                        session.poll_uds_pid_multiframe(uds).await
+                    } else {
+                        session.poll_uds_pid(uds).await
+                    };
+                    match result {
                         Ok(payload) if payload.is_empty() => continue,
                         Ok(payload) => {
                             for f in &uds.fields {

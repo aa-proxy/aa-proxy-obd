@@ -5,10 +5,12 @@
 // moved here so both the Bluetooth and (later) USB adapters share it.
 
 use crate::profile::{FieldSpec, UdsPidSource};
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use log::{debug, trace};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use std::io::ErrorKind;
+use tokio::io::AsyncReadExt;
 use tokio::time::timeout;
 
 /// Default init sequence (preserved from v0.2.0). A profile may override via
@@ -86,6 +88,64 @@ where
         }
         let raw = self.send_cmd(&uds.pid).await?;
         Ok(get_payload(&String::from_utf8_lossy(&raw)))
+    }
+
+    /// Poll a uds_pid source with ISO-TP flow-control reassembly. Used when the
+    /// source has multiframe = true. Ported from manio's read_uds_multiframe.
+    pub async fn poll_uds_pid_multiframe(&mut self, uds: &UdsPidSource) -> Result<Vec<u8>> {
+        let sh   = u32::from_str_radix(&uds.ecu_tx, 16).context("ecu_tx not hex")?;
+        let cra  = u32::from_str_radix(&uds.ecu_rx, 16).context("ecu_rx not hex")?;
+        let fcsh = sh;
+
+        self.send_cmd(&format!("ATSH{:x}", sh)).await?;
+        self.send_cmd(&format!("ATCRA{:x}", cra)).await?;
+        self.send_cmd(&format!("ATFCSH{:x}", fcsh)).await?;
+        self.send_cmd("ATFCSD300000").await?;
+        self.send_cmd("ATFCSM1").await?;
+        self.send_cmd("ATH0").await?;
+
+        // Send the PID directly (then read lines rather than wait for a prompt).
+        let cmd = format!("{}\r", uds.pid);
+        self.stream.write_all(cmd.as_bytes()).await
+            .context("multiframe PID write")?;
+
+        let mut lines: Vec<Vec<u8>> = Vec::new();
+        let mut fc_sent = false;
+
+        for _ in 0..25 {
+            let line = match read_line_raw(&mut self.stream, 500).await {
+                Ok(l) => l,
+                Err(e) if e.kind() == ErrorKind::TimedOut => break,
+                Err(e) => {
+                    let _ = self.send_cmd("ATH1").await;
+                    return Err(anyhow!("multiframe read: {e}"));
+                }
+            };
+            let trimmed = String::from_utf8_lossy(&line).trim().to_string();
+            if trimmed.is_empty() || trimmed == ">" { break; }
+            if trimmed.contains("NO DATA") || trimmed.contains("7F") {
+                let _ = self.send_cmd("ATH1").await;
+                return Err(anyhow!("UDS error response: {trimmed}"));
+            }
+            lines.push(line);
+
+            // After the first ECU frame, send a flow-control frame so the ECU
+            // streams the remaining consecutive frames.
+            if !fc_sent && lines.len() == 1 {
+                self.stream.write_all(b"300200\r").await
+                    .context("FC frame write")?;
+                fc_sent = true;
+            }
+        }
+
+        // Restore session state for subsequent single-frame polls.
+        let _ = self.send_cmd("ATH1").await;
+        let _ = self.send_cmd("ATS1").await;
+        let _ = self.send_cmd("ATCRA").await;
+
+        let payload = assemble_iso_tp(&lines).ok_or_else(|| anyhow!("multiframe assembly failed"))?;
+        // Drop the UDS positive-response header (e.g. 62 01 05).
+        if payload.len() >= 3 { Ok(payload[3..].to_vec()) } else { Ok(payload) }
     }
 }
 
@@ -193,6 +253,79 @@ pub fn extract_value(payload: &[u8], field: &FieldSpec) -> Option<f32> {
         }
     };
     Some(raw * field.multiplier + field.offset)
+}
+
+/// Read a single line (terminated by \r or \n) from the stream, with a
+/// per-read timeout. Returns the line bytes excluding the terminator.
+pub async fn read_line_raw<T>(stream: &mut T, millis: u64) -> std::io::Result<Vec<u8>>
+where T: tokio::io::AsyncRead + Unpin,
+{
+    let mut out = Vec::new();
+    let mut byte = [0u8; 1];
+    loop {
+        match timeout(Duration::from_millis(millis), stream.read(&mut byte)).await {
+            Ok(Ok(0)) => break,
+            Ok(Ok(_)) => {
+                if byte[0] == b'\r' || byte[0] == b'\n' {
+                    if !out.is_empty() { break; }
+                } else {
+                    out.push(byte[0]);
+                }
+            }
+            Ok(Err(e)) => return Err(e),
+            Err(_) => {
+                if out.is_empty() {
+                    return Err(std::io::Error::new(ErrorKind::TimedOut, "line read timeout"));
+                }
+                break;
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Pure-function ISO-TP assembler. Input: hex-ascii lines, each token = one byte
+/// (space-separated). First frame is PCI 0x1L LL <data...>; consecutive frames
+/// are 0x2N <data...>. Returns the assembled payload truncated to the declared
+/// length. Mirrors manio's read_uds_multiframe inner loop without the I/O.
+pub fn assemble_iso_tp(lines: &[Vec<u8>]) -> Option<Vec<u8>> {
+    if lines.is_empty() { return None; }
+
+    let mut payload: Vec<u8> = Vec::new();
+    let mut expected_len: Option<usize> = None;
+    let mut first_line = true;
+
+    for line in lines {
+        let ascii = String::from_utf8_lossy(line);
+        let bytes: Vec<u8> = ascii
+            .split_whitespace()
+            .filter_map(|t| u8::from_str_radix(t, 16).ok())
+            .collect();
+        if bytes.is_empty() { continue; }
+
+        if first_line {
+            // First frame: 10 LL D1 D2 ...
+            if (bytes[0] & 0xF0) != 0x10 { return None; }
+            if bytes.len() < 2 { return None; }
+            expected_len = Some(bytes[1] as usize);
+            payload.extend_from_slice(&bytes[2..]);
+            first_line = false;
+        } else {
+            // Consecutive frame: 2N D1 D2 ...
+            if (bytes[0] & 0xF0) == 0x20 {
+                payload.extend_from_slice(&bytes[1..]);
+            } else {
+                payload.extend_from_slice(&bytes);
+            }
+        }
+        if let Some(exp) = expected_len {
+            if payload.len() >= exp {
+                payload.truncate(exp);
+                break;
+            }
+        }
+    }
+    expected_len.map(|exp| { payload.truncate(exp); payload })
 }
 
 #[cfg(test)]
@@ -307,6 +440,24 @@ mod tests {
             multiplier: 1.0, offset: 0.0, signed: None,
         };
         assert_eq!(extract_value(&p, &f), None);
+    }
+
+    #[test]
+    fn assemble_iso_tp_first_and_consecutive_frames() {
+        // First frame:  10 0A 61 04 11 22 33 44 (length=0x0A=10 bytes)
+        // Consecutive: 21 55 66 77 88 99 AA
+        let lines = vec![
+            b"10 0A 61 04 11 22 33 44".to_vec(),
+            b"21 55 66 77 88 99 AA".to_vec(),
+        ];
+        let p = assemble_iso_tp(&lines).expect("payload");
+        assert_eq!(p, vec![0x61, 0x04, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88]);
+    }
+
+    #[test]
+    fn assemble_iso_tp_rejects_no_first_frame() {
+        let lines = vec![b"21 22 33".to_vec()];
+        assert!(assemble_iso_tp(&lines).is_none());
     }
 
     #[tokio::test]
