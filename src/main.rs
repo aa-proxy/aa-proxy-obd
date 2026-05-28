@@ -92,7 +92,12 @@ async fn main() -> anyhow::Result<()> {
                 &mac, cfg.device.wican_passkey, max_retries, timeout_secs)?)
         }
     };
-    let publisher = Publisher::new(cfg.daemon.api_base_url.clone(), cfg.vehicle.battery_capacity_wh);
+    let publisher = Publisher::new(
+        cfg.daemon.api_base_url.clone(),
+        cfg.vehicle.battery_capacity_wh,
+        cfg.daemon.publish_failure_threshold,
+        cfg.daemon.publish_breaker_secs,
+    );
 
     let running = Arc::new(AtomicBool::new(true));
     {
