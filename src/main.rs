@@ -58,25 +58,38 @@ async fn main() -> anyhow::Result<()> {
     logging::init(&cfg.daemon.log_level, &cfg.daemon.log_file, args.debug);
     info!("aa-proxy-obd started");
 
-    let car_model = cfg.vehicle.profile.clone()
-        .ok_or_else(|| anyhow::anyhow!("vehicle.profile required for ELM327 device types"))?;
-    let profile = VehicleProfile::load(&car_model)?;
-    info!("profile: {}", profile.name);
+    let profile = match cfg.device.kind {
+        DeviceType::Bluetooth | DeviceType::Usb => {
+            let name = cfg.vehicle.profile.clone()
+                .ok_or_else(|| anyhow::anyhow!("vehicle.profile required for ELM327 device types"))?;
+            let p = VehicleProfile::load(&name)?;
+            info!("profile: {}", p.name);
+            Some(p)
+        }
+        DeviceType::Wican => None,
+    };
 
     let adapter: Box<dyn Adapter> = match cfg.device.kind {
         DeviceType::Bluetooth => {
             let mac = cfg.device.bt_mac.clone()
                 .ok_or_else(|| anyhow::anyhow!("device.bt_mac required for type='bluetooth'"))?;
-            Box::new(BluetoothElm327Adapter::new(&mac, profile, cfg.device.bt_passkey)?)
+            let prof = profile.expect("profile present for ELM327 types");
+            Box::new(BluetoothElm327Adapter::new(&mac, prof, cfg.device.bt_passkey)?)
         }
         DeviceType::Usb => {
             let port = cfg.device.usb_port.clone()
                 .ok_or_else(|| anyhow::anyhow!("device.usb_port required for type='usb'"))?;
             let baud = cfg.device.usb_baud.unwrap_or(115200);
-            Box::new(crate::adapter::usb::UsbElm327Adapter::new(&port, baud, profile)?)
+            let prof = profile.expect("profile present for ELM327 types");
+            Box::new(crate::adapter::usb::UsbElm327Adapter::new(&port, baud, prof)?)
         }
         DeviceType::Wican => {
-            anyhow::bail!("device.type='wican' not yet implemented (arrives in the next commit)");
+            let mac = cfg.device.wican_mac.clone()
+                .ok_or_else(|| anyhow::anyhow!("device.wican_mac required for type='wican'"))?;
+            let max_retries  = cfg.device.wican_max_connect_retries.unwrap_or(5);
+            let timeout_secs = cfg.device.wican_timeout_secs.unwrap_or(10);
+            Box::new(crate::adapter::wican::WicanAdapter::new(
+                &mac, cfg.device.wican_passkey, max_retries, timeout_secs)?)
         }
     };
     let publisher = Publisher::new(cfg.daemon.api_base_url.clone(), cfg.vehicle.battery_capacity_wh);

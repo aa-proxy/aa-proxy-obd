@@ -9,6 +9,7 @@ pub mod bluetooth;
 pub mod elm327;
 pub mod pairing;
 pub mod usb;
+pub mod wican;
 
 pub type Metrics = HashMap<String, f32>;
 
