@@ -70,14 +70,14 @@ struct TirePressureData {
 /// Simple daemon to read Renault Zoe basic parameters using
 /// bluetooth dongle and publish to REST
 #[derive(Parser, Debug)]
-#[clap(version, about, long_about = None)]
+#[command(version, about, long_about = None)]
 struct Args {
     /// Enable debug info
-    #[clap(short, long)]
+    #[arg(short, long)]
     debug: bool,
 
     /// Config file path
-    #[clap(short, long, parse(from_os_str), default_value = "/etc/aa-proxy-obd.conf")]
+    #[arg(short, long, default_value = "/etc/aa-proxy-obd.conf")]
     config: std::path::PathBuf,
 }
 
