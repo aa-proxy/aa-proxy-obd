@@ -16,7 +16,7 @@ use std::collections::HashMap;
 mod config;
 mod profile;
 use crate::config::{Config, DeviceType};
-use crate::profile::{VehicleConfig, PidConfig, MetricConfig};
+use crate::profile::{VehicleProfile, UdsPidSource, FieldSpec, Source};
 
 // Secs between polling
 pub const POLL_INTERVAL_SECS: f32 = 10.0;
@@ -200,23 +200,25 @@ pub fn get_payload(response: &str) -> Vec<u8> {
     payload
 }
 
-pub fn extract_value(payload: &[u8], metric: &MetricConfig) -> Option<f32> {
+pub fn extract_value(payload: &[u8], field: &FieldSpec) -> Option<f32> {
+    let byte_index = field.byte_index?;
+    let length = field.length?;
     // The payload array includes the 3-byte header (e.g. 62 01 05).
     // The configured byte_index assumes the header is stripped (0 = first data byte).
-    let idx = if metric.byte_index < 0 {
-        let positive_idx = payload.len() as i32 + metric.byte_index;
+    let idx = if byte_index < 0 {
+        let positive_idx = payload.len() as i32 + byte_index;
         if positive_idx < 0 { return None; }
         positive_idx as usize
     } else {
-        (metric.byte_index + 3) as usize
+        (byte_index + 3) as usize
     };
 
-    if idx + metric.length > payload.len() {
+    if idx + length > payload.len() {
         return None;
     }
 
-    let raw_val = if metric.signed.unwrap_or(false) {
-        match metric.length {
+    let raw_val = if field.signed.unwrap_or(false) {
+        match length {
             1 => payload[idx] as i8 as f32,
             2 => i16::from_be_bytes([payload[idx], payload[idx+1]]) as f32,
             3 => {
@@ -230,7 +232,7 @@ pub fn extract_value(payload: &[u8], metric: &MetricConfig) -> Option<f32> {
             _ => return None,
         }
     } else {
-        match metric.length {
+        match length {
             1 => payload[idx] as f32,
             2 => u16::from_be_bytes([payload[idx], payload[idx+1]]) as f32,
             3 => {
@@ -241,12 +243,12 @@ pub fn extract_value(payload: &[u8], metric: &MetricConfig) -> Option<f32> {
         }
     };
 
-    Some((raw_val * metric.multiplier) + metric.offset)
+    Some((raw_val * field.multiplier) + field.offset)
 }
 
 pub async fn get_raw_pid(
     stream: &mut Stream,
-    p: &PidConfig,
+    p: &UdsPidSource,
 ) -> io::Result<Vec<u8>> {
     let cmd = format!("ATSH{}\r", p.ecu_tx);
     send_cmd(stream, cmd).await?;
@@ -298,7 +300,7 @@ async fn main() -> Result<()> {
     info!("Configured for car model: <b><green>{}</>", &car_model);
     
     // Load vehicle JSON profile
-    let vehicle_cfg = match VehicleConfig::load(&car_model) {
+    let vehicle_cfg = match VehicleProfile::load(&car_model) {
         Ok(c) => c,
         Err(e) => {
             error!("Failed to load vehicle JSON profile: {}", e);
@@ -370,35 +372,41 @@ async fn main() -> Result<()> {
 
                 let mut metrics_map: HashMap<String, f32> = HashMap::new();
 
-                for pid_cfg in &vehicle_cfg.pids {
-                    debug!("Trying to obtain PID: {}", pid_cfg.pid);
-                    match get_raw_pid(&mut stream, pid_cfg).await {
-                        Ok(payload) => {
-                            if payload.is_empty() { continue; }
-                            
-                            for metric in &pid_cfg.fields {
-                                if let Some(val) = extract_value(&payload, metric) {
-                                    info!("Extracted {}: {}", metric.name, val);
-                                    metrics_map.insert(metric.name.clone(), val);
-                                } else {
-                                    warn!("Failed to extract {} (bounds check failed)", metric.name);
+                for source in &vehicle_cfg.sources {
+                    match source {
+                        Source::UdsPid(uds) => {
+                            debug!("Trying to obtain PID: {}", uds.pid);
+                            match get_raw_pid(&mut stream, uds).await {
+                                Ok(payload) => {
+                                    if payload.is_empty() { continue; }
+                                    for field in &uds.fields {
+                                        if let Some(val) = extract_value(&payload, field) {
+                                            info!("Extracted {}: {}", field.name, val);
+                                            metrics_map.insert(field.name.clone(), val);
+                                        } else {
+                                            warn!("Failed to extract {} (bounds check failed)", field.name);
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    info!("GET PARAM error for {}: {:?}", uds.pid, e);
+                                    if e.kind() == std::io::ErrorKind::AddrNotAvailable {
+                                        info!("CAN network down / car is sleeping... waiting 100s");
+                                        poll_interval = Instant::now() + Duration::from_secs_f32(CAR_SLEEP_INTERVAL_SECS);
+                                        continue 'inner;
+                                    }
+                                    if e.kind() == std::io::ErrorKind::BrokenPipe
+                                        || e.kind() == std::io::ErrorKind::TimedOut
+                                        || e.kind() == std::io::ErrorKind::NotConnected
+                                    {
+                                        info!("Broken pipe/TimedOut/NotConnected detected... reconnecting");
+                                        continue 'connect;
+                                    }
                                 }
                             }
                         }
-                        Err(e) => {
-                            info!("GET PARAM error for {}: {:?}", pid_cfg.pid, e);
-                            if e.kind() == std::io::ErrorKind::AddrNotAvailable {
-                                info!("CAN network down / car is sleeping... waiting 100s");
-                                poll_interval = Instant::now() + Duration::from_secs_f32(CAR_SLEEP_INTERVAL_SECS);
-                                continue 'inner;
-                            }
-                            if e.kind() == std::io::ErrorKind::BrokenPipe
-                                || e.kind() == std::io::ErrorKind::TimedOut
-                                || e.kind() == std::io::ErrorKind::NotConnected
-                            {
-                                info!("Broken pipe/TimedOut/NotConnected detected... reconnecting");
-                                continue 'connect;
-                            }
+                        Source::Broadcast(_) => {
+                            warn!("broadcast source encountered but not yet implemented; skipping");
                         }
                     }
                 }
