@@ -4,7 +4,6 @@ use bluer::{
     Address,
 };
 use clap::Parser;
-use ini::Ini;
 use simplelog::*;
 use std::io::{self, Error, ErrorKind};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,7 +14,9 @@ use tokio::time::timeout;
 use std::collections::HashMap;
 
 mod config;
-use config::{VehicleConfig, PidConfig, MetricConfig};
+mod profile;
+use crate::config::{Config, DeviceType};
+use crate::profile::{VehicleConfig, PidConfig, MetricConfig};
 
 // Secs between polling
 pub const POLL_INTERVAL_SECS: f32 = 10.0;
@@ -77,7 +78,7 @@ struct Args {
     debug: bool,
 
     /// Config file path
-    #[arg(short, long, default_value = "/etc/aa-proxy-obd.conf")]
+    #[arg(short, long, default_value = "/etc/aa-proxy-obd.toml")]
     config: std::path::PathBuf,
 }
 
@@ -102,15 +103,6 @@ fn logging_init(debug: bool) {
     loggers.push(console_logger);
 
     CombinedLogger::init(loggers).expect("Cannot initialize logging subsystem");
-}
-
-fn get_config_string(conf: &Ini, option_name: &str, section: Option<&str>) -> io::Result<String> {
-    conf.section(Some(section.unwrap_or("general").to_owned()))
-        .and_then(|x| x.get(option_name).cloned())
-        .ok_or(Error::new(
-            ErrorKind::NotFound,
-            format!("No config entry for: `{}` in section `[{}]`", option_name, section.unwrap_or("general")),
-        ))
 }
 
 pub async fn send_cmd(stream: &mut Stream, cmd: String) -> io::Result<Option<Vec<u8>>> {
@@ -284,20 +276,24 @@ async fn main() -> Result<()> {
     logging_init(args.debug);
     info!("<b><blue>aa-proxy-obd</> started");
     info!("Using config file: <b><blue>{:?}</>", args.config);
-    let conf = match Ini::load_from_file(args.config) {
+    let cfg = match Config::load(&args.config) {
         Ok(c) => c,
         Err(e) => {
             error!("Cannot open config file: {}", e);
             return Ok(());
         }
     };
-    let mac = get_config_string(&conf, "mac", Some("general"))?;
-    let car_model = get_config_string(&conf, "car", Some("general"))?;
-    
-    // Optional parameter
-    let battery_capacity_wh: Option<u32> = get_config_string(&conf, "battery_capacity_wh", Some("general"))
-        .ok()
-        .and_then(|s| s.parse().ok());
+    if cfg.device.kind != DeviceType::Bluetooth {
+        error!("device.type must be 'bluetooth' in this build (usb/wican land in later commits)");
+        return Ok(());
+    }
+    let mac = cfg.device.bt_mac.clone().ok_or_else(|| {
+        Error::new(ErrorKind::InvalidInput, "device.bt_mac is required for type='bluetooth'")
+    })?;
+    let car_model = cfg.vehicle.profile.clone().ok_or_else(|| {
+        Error::new(ErrorKind::InvalidInput, "vehicle.profile is required")
+    })?;
+    let battery_capacity_wh: Option<u32> = cfg.vehicle.battery_capacity_wh;
 
     info!("Configured for car model: <b><green>{}</>", &car_model);
     
