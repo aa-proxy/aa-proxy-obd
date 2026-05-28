@@ -1,5 +1,8 @@
 {
   "name": "Renault Zoe",
+  "elm327": {
+    "init": ["ATZ", "ATE0", "ATAL", "ATCP18", "ATFCSD300000", "ATSP6"]
+  },
   "sources": [
     {
       "kind": "uds_pid",
@@ -9,6 +12,55 @@
       "pre_request": "10C0",
       "fields": [
         {"name": "battery_level_percentage", "byte_index": -3, "length": 3, "multiplier": 0.02, "offset": -2621.44}
+      ]
+    },
+    {
+      "kind": "uds_pid",
+      "ecu_tx": "7E4",
+      "ecu_rx": "7EC",
+      "pid": "222006",
+      "pre_request": "10C0",
+      "fields": [
+        {"name": "odometer_km", "byte_index": -3, "length": 3, "multiplier": 1.0, "offset": 0.0}
+      ]
+    },
+    {
+      "kind": "uds_pid",
+      "ecu_tx": "7E4",
+      "ecu_rx": "7EC",
+      "pid": "22320C",
+      "pre_request": "10C0",
+      "fields": [
+        {"name": "battery_level_wh", "byte_index": -2, "length": 2, "multiplier": 5.0, "offset": 0.0}
+      ]
+    },
+    {
+      "kind": "uds_pid",
+      "ecu_tx": "745",
+      "ecu_rx": "765",
+      "pid": "2174",
+      "multiframe": true,
+      "fields": [
+        {"name": "tire_rr_kpa", "byte_index": 11, "length": 1, "multiplier": 1.3725, "offset": 0.0},
+        {"name": "tire_rl_kpa", "byte_index": 12, "length": 1, "multiplier": 1.3725, "offset": 0.0},
+        {"name": "tire_fr_kpa", "byte_index": 13, "length": 1, "multiplier": 1.3725, "offset": 0.0},
+        {"name": "tire_fl_kpa", "byte_index": 14, "length": 1, "multiplier": 1.3725, "offset": 0.0}
+      ]
+    },
+    {
+      "kind": "broadcast",
+      "init": ["ATCRA", "ATH1", "ATS1"],
+      "command": "ATMA",
+      "deadline_ms": 6000,
+      "idle_timeout_ms": 600,
+      "stop_when": ["external_temp_celsius"],
+      "frames": [
+        {
+          "can_id": "656",
+          "fields": [
+            {"name": "external_temp_celsius", "byte_index": 6, "length": 1, "multiplier": 1.0, "offset": -40.0}
+          ]
+        }
       ]
     }
   ]
