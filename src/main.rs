@@ -1,13 +1,13 @@
 extern crate ctrlc;
 use clap::Parser;
 use log::{error, info};
-use simplelog::*;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 mod adapter;
 mod config;
+mod logging;
 mod output;
 mod profile;
 mod scheduler;
@@ -24,24 +24,17 @@ struct Args {
     #[arg(short, long, default_value = "/etc/aa-proxy-obd.toml")] config: PathBuf,
 }
 
-fn logging_init(debug: bool) {
-    let conf = ConfigBuilder::new()
-        .set_time_format("%F, %H:%M:%S%.3f".to_string())
-        .build();
-    let level = if debug { LevelFilter::Debug } else { LevelFilter::Info };
-    CombinedLogger::init(vec![
-        TermLogger::new(level, conf, TerminalMode::Mixed, ColorChoice::Auto),
-    ]).expect("logger init");
-}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
-    logging_init(args.debug);
-    info!("aa-proxy-obd started");
 
-    let cfg = Config::load(&args.config)
-        .map_err(|e| { error!("config: {e}"); e })?;
+    let cfg = match Config::load(&args.config) {
+        Ok(c) => c,
+        Err(e) => { eprintln!("aa-proxy-obd: config load failed: {e}"); std::process::exit(1); }
+    };
+    logging::init(&cfg.daemon.log_level, &cfg.daemon.log_file, args.debug);
+    info!("aa-proxy-obd started");
 
     if cfg.device.kind != DeviceType::Bluetooth {
         error!("device.type must be 'bluetooth' in this build");

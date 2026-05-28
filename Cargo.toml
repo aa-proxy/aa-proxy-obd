@@ -15,7 +15,7 @@ repository = 'https://github.com/aa-proxy/aa-proxy-obd'
 
 [dependencies]
 log = "0.4"
-simplelog = { version = "0.11.2", features = ["paris", "ansi_term"] }
+simplelog = { version = "0.12", features = ["paris", "ansi_term"] }
 ctrlc = { version = "3.4", features = ["termination"] }
 clap = { version = "4.5", features = ["derive"] }
 tokio = { version = "1.36", features = ["full"] }
