@@ -115,14 +115,14 @@ where
                 Ok(l) => l,
                 Err(e) if e.kind() == ErrorKind::TimedOut => break,
                 Err(e) => {
-                    let _ = self.send_cmd("ATH1").await;
+                    let _ = self.send_cmd("ATH0").await;
                     return Err(anyhow!("multiframe read: {e}"));
                 }
             };
             let trimmed = String::from_utf8_lossy(&line).trim().to_string();
             if trimmed.is_empty() || trimmed == ">" { break; }
             if trimmed.contains("NO DATA") || trimmed.contains("7F") {
-                let _ = self.send_cmd("ATH1").await;
+                let _ = self.send_cmd("ATH0").await;
                 return Err(anyhow!("UDS error response: {trimmed}"));
             }
             lines.push(line);
@@ -136,8 +136,11 @@ where
             }
         }
 
-        // Restore session state for subsequent single-frame polls.
-        let _ = self.send_cmd("ATH1").await;
+        // Restore the headers-OFF baseline that single-frame get_payload
+        // expects (DEFAULT_INIT relies on the ELM327 power-on default of
+        // headers off; ATH0 here prevents header bytes leaking into the next
+        // cycle's single-frame parsing).
+        let _ = self.send_cmd("ATH0").await;
         let _ = self.send_cmd("ATS1").await;
         let _ = self.send_cmd("ATCRA").await;
 
@@ -195,6 +198,9 @@ where
             }
         }
         let _ = self.send_cmd("ATCRA").await;
+        // Restore headers OFF: the broadcast init turned headers ON for ATMA,
+        // but single-frame get_payload on the next cycle expects them off.
+        let _ = self.send_cmd("ATH0").await;
 
         // Extract from the most recent payload seen for each CAN-ID.
         let mut metrics: HashMap<String, f32> = HashMap::new();
