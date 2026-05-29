@@ -47,7 +47,11 @@ impl BluetoothElm327Adapter {
 #[async_trait]
 impl Adapter for BluetoothElm327Adapter {
     async fn connect(&mut self) -> Result<(), AdapterError> {
-        if let Some(pk) = self.bt_passkey {
+        // Register the pairing agent once and keep it for the life of the
+        // adapter; re-registering on every reconnect would repeatedly claim the
+        // system default agent.
+        if self.bt_passkey.is_some() && self._agent_handle.is_none() {
+            let pk = self.bt_passkey.unwrap();
             let session = bluer::Session::new().await
                 .map_err(|e| AdapterError::FatalConn(anyhow!("bluer session: {e}")))?;
             let handle = crate::adapter::pairing::register_passkey_agent(&session, pk).await
