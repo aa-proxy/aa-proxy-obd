@@ -93,6 +93,7 @@ impl Adapter for BluetoothElm327Adapter {
                         Ok(payload) => {
                             for f in &uds.fields {
                                 if let Some(v) = extract_value(&payload, f) {
+                                    info!("{}: {}", f.name, v);
                                     metrics.insert(f.name.clone(), v);
                                 } else {
                                     warn!("extract failed for field '{}'", f.name);
