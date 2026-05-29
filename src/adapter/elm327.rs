@@ -5,7 +5,7 @@
 use crate::profile::{BroadcastSource, FieldSpec, UdsPidSource};
 use anyhow::{anyhow, Context, Result};
 use log::{debug, trace};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use std::io::ErrorKind;
@@ -169,13 +169,30 @@ where
         let mut consecutive_timeouts: u64 = 0;
         let idle_attempts = ((spec.idle_timeout_ms + 199) / 200).max(1);
 
+        // CAN-IDs whose frame carries a field listed in stop_when. Once a line
+        // has arrived for each of them, the wanted data is in hand and the scan
+        // can end before the deadline.
+        let needed_ids: HashSet<String> = spec.frames.iter()
+            .filter(|f| f.fields.iter().any(|fld| spec.stop_when.iter().any(|s| s == &fld.name)))
+            .map(|f| f.can_id.clone())
+            .collect();
+        let mut seen_ids: HashSet<String> = HashSet::new();
+
         while tokio::time::Instant::now() < deadline {
             match read_line_raw(&mut self.stream, 200).await {
                 Ok(b) => {
                     consecutive_timeouts = 0;
                     let ascii = String::from_utf8_lossy(&b).into_owned();
                     if !ascii.trim().is_empty() {
+                        if let Some(id) = ascii.split_whitespace().next() {
+                            if id.chars().all(|c| c.is_ascii_hexdigit()) {
+                                seen_ids.insert(id.to_string());
+                            }
+                        }
                         lines.push(ascii);
+                        if !needed_ids.is_empty() && needed_ids.iter().all(|id| seen_ids.contains(id)) {
+                            break;
+                        }
                     }
                 }
                 Err(e) if e.kind() == ErrorKind::TimedOut => {
