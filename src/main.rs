@@ -1,4 +1,5 @@
 extern crate ctrlc;
+use clap::builder::styling::{AnsiColor, Styles};
 use clap::Parser;
 use log::info;
 use std::path::PathBuf;
@@ -21,8 +22,14 @@ use crate::config::{Config, DeviceType};
 use crate::output::Publisher;
 use crate::profile::VehicleProfile;
 
+const HELP_STYLES: Styles = Styles::styled()
+    .header(AnsiColor::Yellow.on_default().bold())
+    .usage(AnsiColor::Yellow.on_default().bold())
+    .literal(AnsiColor::Green.on_default().bold())
+    .placeholder(AnsiColor::Cyan.on_default());
+
 #[derive(Parser, Debug)]
-#[command(version, about, long_about = None)]
+#[command(version, about, long_about = None, styles = HELP_STYLES)]
 struct Args {
     #[command(subcommand)]
     command: Option<Commands>,
