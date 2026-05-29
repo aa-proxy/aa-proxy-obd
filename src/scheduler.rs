@@ -49,16 +49,21 @@ pub async fn run(
             }
             match adapter.poll().await {
                 Ok(metrics) => {
-                    let any_ok = publisher.publish(&metrics).await;
-                    if any_ok {
+                    // Drive the watchdog from whether the adapter produced data,
+                    // not from publish success: a healthy adapter whose endpoint
+                    // is down (circuit breaker open) should keep running and let
+                    // the breaker back off, not be killed by the watchdog.
+                    let produced_data = !metrics.is_empty();
+                    let _ = publisher.publish(&metrics).await;
+                    if produced_data {
                         no_publish_cycles = 0;
                     } else {
                         no_publish_cycles += 1;
                         if watchdog_should_fire(no_publish_cycles, limit) {
-                            error!("watchdog tripped: {} consecutive cycles with no successful POSTs; exiting", no_publish_cycles);
+                            error!("watchdog tripped: {} consecutive cycles produced no data; exiting", no_publish_cycles);
                             std::process::exit(2);
                         }
-                        warn!("no successful POSTs this cycle ({}/{})", no_publish_cycles, limit);
+                        warn!("no data collected this cycle ({}/{})", no_publish_cycles, limit);
                     }
                     poll_deadline = Instant::now() + poll_interval;
                 }
