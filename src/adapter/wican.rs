@@ -46,7 +46,10 @@ impl WicanAdapter {
 
     async fn find_device(&self) -> anyhow::Result<Device> {
         let adapter = self.adapter.as_ref().context("adapter missing")?;
-        if adapter.device(self.mac).is_ok() {
+        // adapter.device(mac) only builds a handle from an address; it does not
+        // indicate whether BlueZ knows the device. Check the known-address list
+        // before deciding whether a discovery scan is needed.
+        if adapter.device_addresses().await?.contains(&self.mac) {
             return Ok(adapter.device(self.mac)?);
         }
         let mut events = adapter.discover_devices().await?;

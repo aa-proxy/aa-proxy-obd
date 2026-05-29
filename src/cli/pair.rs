@@ -42,8 +42,9 @@ pub async fn run(config_path: &Path, passkey_arg: Option<u32>) -> Result<()> {
     let _handle = register_passkey_agent(&session, passkey).await?;
     let adapter = session.default_adapter().await.context("default adapter")?;
 
-    // Discover the device if BlueZ doesn't already know it.
-    if adapter.device(mac).is_err() {
+    // Discover the device if BlueZ doesn't already know it. (adapter.device()
+    // always succeeds at building a handle, so check the known-address list.)
+    if !adapter.device_addresses().await?.contains(&mac) {
         info!("device not known; running discovery for up to 15s");
         adapter.set_discovery_filter(Default::default()).await.ok();
         let mut events = adapter.discover_devices().await?;
