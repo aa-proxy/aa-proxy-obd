@@ -73,6 +73,7 @@ pub async fn run(
                 }
                 Err(AdapterError::FatalConn(e)) => {
                     info!("connection lost: {e:#}; reconnecting");
+                    adapter.disconnect().await;
                     continue 'connect;
                 }
                 Err(AdapterError::Sleeping) => {
