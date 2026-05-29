@@ -178,8 +178,10 @@ impl Adapter for WicanAdapter {
         match self.fetch_metrics().await {
             Ok(m) => Ok(m),
             Err(e) => {
-                let msg = format!("{e:#}");
-                if msg.contains("JSON") {
+                // A malformed JSON burst is transient (the next poll may parse);
+                // anything else is treated as a lost connection. Classify on the
+                // error type, not its message text.
+                if e.downcast_ref::<serde_json::Error>().is_some() {
                     Err(AdapterError::Transient(e))
                 } else {
                     Err(AdapterError::FatalConn(e))
