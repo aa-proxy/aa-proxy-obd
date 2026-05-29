@@ -19,13 +19,9 @@ pub async fn run(config_path: &Path, passkey_arg: Option<u32>) -> Result<()> {
     let cfg = Config::load(config_path).context("load config")?;
 
     let (mac_str, key_name) = match cfg.device.kind {
-        DeviceType::Bluetooth => (
+        DeviceType::Bluetooth | DeviceType::Wican => (
             cfg.device.bt_mac.clone().ok_or_else(|| anyhow!("[device].bt_mac is required"))?,
             "bt_passkey",
-        ),
-        DeviceType::Wican => (
-            cfg.device.wican_mac.clone().ok_or_else(|| anyhow!("[device].wican_mac is required"))?,
-            "wican_passkey",
         ),
         DeviceType::Usb => return Err(anyhow!("`pair` is not applicable for device.type = 'usb'")),
     };

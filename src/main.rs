@@ -77,12 +77,17 @@ async fn main() -> anyhow::Result<()> {
         DeviceType::Wican => None,
     };
 
+    // Shared Bluetooth connection options (apply to bluetooth + wican).
+    let bt_retries = cfg.device.bt_max_connect_retries.unwrap_or(5);
+    let bt_timeout = cfg.device.bt_timeout_secs.unwrap_or(10);
+
     let adapter: Box<dyn Adapter> = match cfg.device.kind {
         DeviceType::Bluetooth => {
             let mac = cfg.device.bt_mac.clone()
                 .ok_or_else(|| anyhow::anyhow!("device.bt_mac required for type='bluetooth'"))?;
             let prof = profile.expect("profile present for ELM327 types");
-            Box::new(BluetoothElm327Adapter::new(&mac, prof, cfg.device.bt_passkey)?)
+            Box::new(BluetoothElm327Adapter::new(
+                &mac, prof, cfg.device.bt_passkey, bt_retries, bt_timeout)?)
         }
         DeviceType::Usb => {
             let port = cfg.device.usb_port.clone()
@@ -92,12 +97,10 @@ async fn main() -> anyhow::Result<()> {
             Box::new(crate::adapter::usb::UsbElm327Adapter::new(&port, baud, prof)?)
         }
         DeviceType::Wican => {
-            let mac = cfg.device.wican_mac.clone()
-                .ok_or_else(|| anyhow::anyhow!("device.wican_mac required for type='wican'"))?;
-            let max_retries  = cfg.device.wican_max_connect_retries.unwrap_or(5);
-            let timeout_secs = cfg.device.wican_timeout_secs.unwrap_or(10);
+            let mac = cfg.device.bt_mac.clone()
+                .ok_or_else(|| anyhow::anyhow!("device.bt_mac required for type='wican'"))?;
             Box::new(crate::adapter::wican::WicanAdapter::new(
-                &mac, cfg.device.wican_passkey, max_retries, timeout_secs)?)
+                &mac, cfg.device.bt_passkey, bt_retries, bt_timeout)?)
         }
     };
     let publisher = Publisher::new(

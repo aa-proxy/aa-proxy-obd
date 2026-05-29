@@ -71,29 +71,43 @@ Options:
 ```
 
 ## Config — `/etc/aa-proxy-obd.toml`
+
+Only `device.type`, the device's address (`bt_mac` for `bluetooth`/`wican`,
+`usb_port` for `usb`), and `vehicle.profile` (for the ELM327 types) are
+required. Everything else is optional and falls back to the defaults shown
+below, so a minimal config is just:
+
 ```toml
 [device]
-type        = "bluetooth"        # bluetooth | usb | wican
-
-bt_mac      = "AA:BB:CC:DD:EE:FF"
-bt_passkey  = 1234               # optional; enables in-process pairing
-
-usb_port    = "/dev/ttyUSB0"
-usb_baud    = 115200
-
-wican_mac                 = "11:22:33:44:55:66"
-wican_passkey             = 123456
-wican_max_connect_retries = 5
-wican_timeout_secs        = 10
+type   = "bluetooth"
+bt_mac = "AA:BB:CC:DD:EE:FF"
 
 [vehicle]
-profile             = "ev6"      # ignored when device.type = "wican"
-battery_capacity_wh = 77400      # optional; enables derived battery_level_wh
+profile = "ev6"
+```
+
+Full set of options with their defaults:
+
+```toml
+[device]
+type                      = "bluetooth"                # bluetooth | usb | wican
+
+bt_mac                    = "AA:BB:CC:DD:EE:FF"        # bluetooth + wican; the adapter's MAC
+bt_passkey                = 1234                       # optional; enables in-process pairing
+bt_max_connect_retries    = 5                          # bluetooth + wican
+bt_timeout_secs           = 10                         # bluetooth + wican; per-attempt connect/response timeout
+
+usb_port                  = "/dev/ttyUSB0"             # ls -l /dev/ttyUSB* /dev/ttyACM* 2>/dev/null
+usb_baud                  = 115200
+
+[vehicle]
+profile                   = "ev6"                      # ignored when device.type = "wican"
+battery_capacity_wh       = 77400                      # optional; enables derived battery_level_wh
 
 [daemon]
 poll_interval_secs        = 10
-car_sleep_interval_secs   = 100      # poll interval while the car is asleep
-log_level                 = "info"   # off | error | warn | info | debug | trace
+car_sleep_interval_secs   = 100                        # poll interval while the car is asleep
+log_level                 = "info"                     # off | error | warn | info | debug | trace
 log_file                  = "/var/log/aa-proxy-obd.log"
 api_base_url              = "http://localhost"
 bridge_dropouts           = true
@@ -101,8 +115,10 @@ publish_failure_threshold = 5
 publish_breaker_secs      = 300
 cycle_failure_limit       = 20
 ```
-Keys under `[device]` that don't apply to the selected `type` are ignored. All
-`[daemon]` keys have the defaults shown; override only what you need.
+
+The `wican` device type connects over Bluetooth, so it shares the `bt_*`
+options (`bt_mac`, `bt_passkey`, `bt_max_connect_retries`, `bt_timeout_secs`).
+Keys under `[device]` that don't apply to the selected `type` are ignored.
 
 ## Vehicle profiles
 Profile JSON files ship under [`profiles/`](profiles/). At install time, copy
@@ -162,9 +178,10 @@ a `kind` discriminator.
 4. Point `profile = <name>` at it in the config. No code changes required.
 
 ## Bluetooth pairing
-If `[device].bt_passkey` (or `wican_passkey` for WiCAN) is set, the daemon
-registers a BlueZ agent at connect time that supplies the passkey during first
-pairing. BlueZ ignores the agent for already-paired devices.
+If `[device].bt_passkey` is set, the daemon registers a BlueZ agent at connect
+time that supplies the passkey during first pairing (this applies to both the
+`bluetooth` and `wican` device types). BlueZ ignores the agent for
+already-paired devices.
 
 For one-shot setup:
 ```sh

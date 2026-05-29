@@ -8,18 +8,27 @@ use async_trait::async_trait;
 use bluer::{rfcomm::{SocketAddr, Stream}, Address};
 use log::{debug, info, warn};
 use std::time::Duration;
+use tokio::time::timeout;
 
 pub struct BluetoothElm327Adapter {
     target: SocketAddr,
     profile: VehicleProfile,
     session: Option<Elm327Session<Stream>>,
     bt_passkey: Option<u32>,
+    max_retries: u8,
+    timeout_secs: u8,
     bluer_session: Option<bluer::Session>,
     _agent_handle: Option<bluer::agent::AgentHandle>,
 }
 
 impl BluetoothElm327Adapter {
-    pub fn new(mac: &str, profile: VehicleProfile, bt_passkey: Option<u32>) -> anyhow::Result<Self> {
+    pub fn new(
+        mac: &str,
+        profile: VehicleProfile,
+        bt_passkey: Option<u32>,
+        max_retries: u8,
+        timeout_secs: u8,
+    ) -> anyhow::Result<Self> {
         let addr: Address = mac.parse()
             .map_err(|_| anyhow!("invalid bluetooth MAC '{mac}'"))?;
         Ok(Self {
@@ -27,6 +36,8 @@ impl BluetoothElm327Adapter {
             profile,
             session: None,
             bt_passkey,
+            max_retries: max_retries.max(1),
+            timeout_secs,
             bluer_session: None,
             _agent_handle: None,
         })
@@ -44,9 +55,22 @@ impl Adapter for BluetoothElm327Adapter {
             self.bluer_session = Some(session);
             self._agent_handle = Some(handle);
         }
-        info!("Connecting to: {:?}", &self.target);
-        let stream = Stream::connect(self.target).await
-            .map_err(|e| AdapterError::FatalConn(anyhow!("BT connect failed: {e}")))?;
+        let connect_timeout = Duration::from_secs(self.timeout_secs as u64);
+        let mut connected = None;
+        for attempt in 1..=self.max_retries {
+            info!("Connecting to {:?} (attempt {}/{})", self.target, attempt, self.max_retries);
+            match timeout(connect_timeout, Stream::connect(self.target)).await {
+                Ok(Ok(s)) => { connected = Some(s); break; }
+                Ok(Err(e)) => warn!("BT connect attempt {attempt} failed: {e}"),
+                Err(_) => warn!("BT connect attempt {attempt} timed out after {}s", self.timeout_secs),
+            }
+            if attempt < self.max_retries {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+        }
+        let stream = connected.ok_or_else(|| {
+            AdapterError::FatalConn(anyhow!("BT connect failed after {} attempts", self.max_retries))
+        })?;
 
         // bluer local-address workaround
         // https://github.com/bluez/bluer/discussions/130#discussioncomment-8845113

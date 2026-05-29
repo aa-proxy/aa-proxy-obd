@@ -18,24 +18,21 @@ pub struct DeviceConfig {
     #[serde(rename = "type")]
     pub kind: DeviceType,
 
+    // Bluetooth options, shared by the "bluetooth" and "wican" device types
+    // (both connect over Bluetooth).
     #[serde(default)]
     pub bt_mac: Option<String>,
     #[serde(default)]
     pub bt_passkey: Option<u32>,
+    #[serde(default)]
+    pub bt_max_connect_retries: Option<u8>,
+    #[serde(default)]
+    pub bt_timeout_secs: Option<u8>,
 
     #[serde(default)]
     pub usb_port: Option<String>,
     #[serde(default)]
     pub usb_baud: Option<u32>,
-
-    #[serde(default)]
-    pub wican_mac: Option<String>,
-    #[serde(default)]
-    pub wican_passkey: Option<u32>,
-    #[serde(default)]
-    pub wican_max_connect_retries: Option<u8>,
-    #[serde(default)]
-    pub wican_timeout_secs: Option<u8>,
 }
 
 impl Default for DeviceType {
@@ -152,10 +149,10 @@ mod tests {
         let src = r#"
             [device]
             type = "wican"
-            wican_mac = "11:22:33:44:55:66"
-            wican_passkey = 123456
-            wican_max_connect_retries = 7
-            wican_timeout_secs = 15
+            bt_mac = "11:22:33:44:55:66"
+            bt_passkey = 123456
+            bt_max_connect_retries = 7
+            bt_timeout_secs = 15
 
             [vehicle]
             battery_capacity_wh = 77400
@@ -173,10 +170,10 @@ mod tests {
         "#;
         let cfg: Config = toml::from_str(src).unwrap();
         assert_eq!(cfg.device.kind, DeviceType::Wican);
-        assert_eq!(cfg.device.wican_mac.as_deref(), Some("11:22:33:44:55:66"));
-        assert_eq!(cfg.device.wican_passkey, Some(123456));
-        assert_eq!(cfg.device.wican_max_connect_retries, Some(7));
-        assert_eq!(cfg.device.wican_timeout_secs, Some(15));
+        assert_eq!(cfg.device.bt_mac.as_deref(), Some("11:22:33:44:55:66"));
+        assert_eq!(cfg.device.bt_passkey, Some(123456));
+        assert_eq!(cfg.device.bt_max_connect_retries, Some(7));
+        assert_eq!(cfg.device.bt_timeout_secs, Some(15));
         assert_eq!(cfg.vehicle.battery_capacity_wh, Some(77400));
         assert!((cfg.daemon.poll_interval_secs - 5.0).abs() < f32::EPSILON);
         assert!((cfg.daemon.car_sleep_interval_secs - 200.0).abs() < f32::EPSILON);
