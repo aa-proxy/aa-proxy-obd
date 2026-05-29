@@ -298,9 +298,11 @@ fn extract_bits(payload: &[u8], bit_offset: u32, bit_length: u32) -> Option<u32>
 /// extraction is tried first (when bit_offset + bit_length are set); otherwise
 /// falls back to byte-aligned extraction.
 pub fn extract_value(payload: &[u8], field: &FieldSpec) -> Option<f32> {
-    // Bit branch first — explicit opt-in via bit_offset+bit_length.
+    // Bit branch first — explicit opt-in via bit_offset+bit_length. The offset
+    // is shifted by 24 bits to skip the 3-byte UDS positive-response header, so
+    // bit_offset is header-relative exactly like byte_index in the byte branch.
     if let (Some(bit_off), Some(bit_len)) = (field.bit_offset, field.bit_length) {
-        return extract_bits(payload, bit_off, bit_len)
+        return extract_bits(payload, bit_off + 24, bit_len)
             .map(|v| (v as f32) * field.multiplier + field.offset);
     }
 
@@ -546,48 +548,39 @@ mod tests {
 
     #[test]
     fn extract_single_bit_msb() {
-        let p = vec![0xA5, 0x3C, 0xFF, 0x00];
+        // bit 0 (MSB of byte 0) of 0xA5 = 1
+        assert_eq!(extract_bits(&[0xA5, 0x3C, 0xFF, 0x00], 0, 1), Some(1));
+    }
+
+    #[test]
+    fn extract_three_bit_value_spanning_byte_boundary() {
+        // bits 6..8 of 0xA5 0x3C: byte0 last two bits = 01, byte1 first bit = 0 -> 010 = 2
+        assert_eq!(extract_bits(&[0xA5, 0x3C], 6, 3), Some(2));
+    }
+
+    #[test]
+    fn extract_full_byte_via_bit_field() {
+        // bits 8..15 of 0xA5 0x3C = 0x3C = 60
+        assert_eq!(extract_bits(&[0xA5, 0x3C], 8, 8), Some(60));
+    }
+
+    #[test]
+    fn extract_bit_out_of_range_returns_none() {
+        assert_eq!(extract_bits(&[0xFF, 0xFF], 20, 4), None);
+    }
+
+    #[test]
+    fn extract_value_bit_offset_is_uds_header_relative() {
+        // extract_value treats bit_offset as relative to the data after the
+        // 3-byte UDS response header, matching byte_index in the byte branch.
+        let mut p = vec![0u8; 6];
+        p[3] = 0b1000_0000; // first data byte, MSB set
         let f = FieldSpec {
             name: "x".into(), byte_index: None, length: None,
             bit_offset: Some(0), bit_length: Some(1),
             multiplier: 1.0, offset: 0.0, signed: None,
         };
         assert_eq!(extract_value(&p, &f), Some(1.0));
-    }
-
-    #[test]
-    fn extract_three_bit_value_spanning_byte_boundary() {
-        // bits 6..8 of 0xA5 0x3C: byte0 last two bits = 01, byte1 first bit = 0 -> 010 = 2
-        let p = vec![0xA5, 0x3C];
-        let f = FieldSpec {
-            name: "x".into(), byte_index: None, length: None,
-            bit_offset: Some(6), bit_length: Some(3),
-            multiplier: 1.0, offset: 0.0, signed: None,
-        };
-        assert_eq!(extract_value(&p, &f), Some(2.0));
-    }
-
-    #[test]
-    fn extract_full_byte_via_bit_field() {
-        // bits 8..15 of 0xA5 0x3C = 0x3C = 60
-        let p = vec![0xA5, 0x3C];
-        let f = FieldSpec {
-            name: "x".into(), byte_index: None, length: None,
-            bit_offset: Some(8), bit_length: Some(8),
-            multiplier: 1.0, offset: 0.0, signed: None,
-        };
-        assert_eq!(extract_value(&p, &f), Some(60.0));
-    }
-
-    #[test]
-    fn extract_bit_out_of_range_returns_none() {
-        let p = vec![0xFF, 0xFF];
-        let f = FieldSpec {
-            name: "x".into(), byte_index: None, length: None,
-            bit_offset: Some(20), bit_length: Some(4),
-            multiplier: 1.0, offset: 0.0, signed: None,
-        };
-        assert_eq!(extract_value(&p, &f), None);
     }
 
     #[test]
