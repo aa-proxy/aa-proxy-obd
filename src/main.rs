@@ -56,14 +56,15 @@ async fn main() -> anyhow::Result<()> {
         Err(e) => { eprintln!("aa-proxy-obd: config load failed: {e}"); std::process::exit(1); }
     };
     logging::init(&cfg.daemon.log_level, &cfg.daemon.log_file, args.debug);
-    info!("aa-proxy-obd started");
+    info!("<b><blue>aa-proxy-obd</> started");
+    info!("Using config file: <b><blue>{:?}</>", args.config);
 
     let profile = match cfg.device.kind {
         DeviceType::Bluetooth | DeviceType::Usb => {
             let name = cfg.vehicle.profile.clone()
                 .ok_or_else(|| anyhow::anyhow!("vehicle.profile required for ELM327 device types"))?;
             let p = VehicleProfile::load(&name)?;
-            info!("profile: {}", p.name);
+            info!("Loaded profile: <b><green>{}</>", p.name);
             Some(p)
         }
         DeviceType::Wican => None,
