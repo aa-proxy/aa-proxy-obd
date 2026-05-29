@@ -47,15 +47,15 @@ where
         let mut reader = BufReader::new(&mut self.stream);
 
         match timeout(SEND_CMD_TIMEOUT, reader.read_until(EOM_PROMPT, &mut buf)).await {
-            Ok(Ok(0)) => Err(anyhow::Error::new(IoError::new(ErrorKind::Other, format!("0 bytes for '{cmd}'")))),
+            Ok(Ok(0)) => Err(anyhow::Error::new(IoError::other(format!("0 bytes for '{cmd}'")))),
             Ok(Ok(_)) => {
                 let ascii = String::from_utf8_lossy(&buf);
                 trace!("Response ASCII: {ascii}");
                 if ascii.contains("NO DATA") {
-                    return Err(anyhow::Error::new(IoError::new(ErrorKind::Other, "no data")));
+                    return Err(anyhow::Error::new(IoError::other("no data")));
                 }
                 if ascii.contains("7F 22 12") {
-                    return Err(anyhow::Error::new(IoError::new(ErrorKind::Other, "Service Not Supported")));
+                    return Err(anyhow::Error::new(IoError::other("Service Not Supported")));
                 }
                 Ok(buf)
             }
@@ -167,7 +167,7 @@ where
         let deadline = tokio::time::Instant::now() + Duration::from_millis(spec.deadline_ms);
         let mut lines: Vec<String> = Vec::new();
         let mut consecutive_timeouts: u64 = 0;
-        let idle_attempts = ((spec.idle_timeout_ms + 199) / 200).max(1);
+        let idle_attempts = spec.idle_timeout_ms.div_ceil(200).max(1);
 
         // CAN-IDs whose frame carries a field listed in stop_when. Once a line
         // has arrived for each of them, the wanted data is in hand and the scan
@@ -240,7 +240,7 @@ where
 /// Strip ELM327 framing from a raw response string and return the UDS payload
 /// bytes (header + data).
 pub fn get_payload(response: &str) -> Vec<u8> {
-    let frames: Vec<&str> = response.split(|c| c == '\r' || c == '\n')
+    let frames: Vec<&str> = response.split(['\r', '\n'])
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
         .filter(|s| !s.contains("SEARCHING"))
@@ -280,7 +280,7 @@ pub fn get_payload(response: &str) -> Vec<u8> {
 fn extract_bits(payload: &[u8], bit_offset: u32, bit_length: u32) -> Option<u32> {
     if bit_length == 0 || bit_length > 16 { return None; }
     let last_bit = bit_offset + bit_length;
-    let needed_bytes = ((last_bit + 7) / 8) as usize;
+    let needed_bytes = last_bit.div_ceil(8) as usize;
     if needed_bytes > payload.len() { return None; }
 
     let mut acc: u32 = 0;

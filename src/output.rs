@@ -212,7 +212,7 @@ impl Publisher {
     }
 
     async fn attempt_battery(&self, b: &BatteryData) -> bool {
-        { if !self.breakers.lock().await.battery.allow() { return false; } }
+        if !self.breakers.lock().await.battery.allow() { return false; }
         let ok = self.post(&format!("{}/battery", self.api_base), b).await;
         let mut br = self.breakers.lock().await;
         if ok { br.battery.record_success(); } else { br.battery.record_failure(); }
@@ -220,7 +220,7 @@ impl Publisher {
     }
 
     async fn attempt_odometer(&self, o: &OdometerData) -> bool {
-        { if !self.breakers.lock().await.odometer.allow() { return false; } }
+        if !self.breakers.lock().await.odometer.allow() { return false; }
         let ok = self.post(&format!("{}/odometer", self.api_base), o).await;
         let mut br = self.breakers.lock().await;
         if ok { br.odometer.record_success(); } else { br.odometer.record_failure(); }
@@ -228,7 +228,7 @@ impl Publisher {
     }
 
     async fn attempt_tire_pressure(&self, t: &TirePressureData) -> bool {
-        { if !self.breakers.lock().await.tire_pressure.allow() { return false; } }
+        if !self.breakers.lock().await.tire_pressure.allow() { return false; }
         let ok = self.post(&format!("{}/tire-pressure", self.api_base), t).await;
         let mut br = self.breakers.lock().await;
         if ok { br.tire_pressure.record_success(); } else { br.tire_pressure.record_failure(); }

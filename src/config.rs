@@ -7,7 +7,9 @@ use std::path::Path;
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum DeviceType {
+    #[default]
     Bluetooth,
     Usb,
     Wican,
@@ -35,9 +37,6 @@ pub struct DeviceConfig {
     pub usb_baud: Option<u32>,
 }
 
-impl Default for DeviceType {
-    fn default() -> Self { DeviceType::Bluetooth }
-}
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct VehicleSection {

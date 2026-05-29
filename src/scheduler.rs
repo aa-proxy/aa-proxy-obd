@@ -87,10 +87,6 @@ pub async fn run(
                     no_publish_cycles = 0;
                     poll_deadline = Instant::now() + sleep_interval;
                 }
-                Err(AdapterError::Permanent(e)) => {
-                    error!("permanent: {e:#}");
-                    std::process::exit(1);
-                }
             }
         }
     }

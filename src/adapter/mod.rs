@@ -23,8 +23,6 @@ pub enum AdapterError {
     FatalConn(anyhow::Error),
     /// CAN bus down — extend poll interval.
     Sleeping,
-    /// Log and exit 1.
-    Permanent(anyhow::Error),
 }
 
 impl std::fmt::Display for AdapterError {
@@ -33,7 +31,6 @@ impl std::fmt::Display for AdapterError {
             AdapterError::Transient(e) => write!(f, "transient: {e:#}"),
             AdapterError::FatalConn(e) => write!(f, "fatal-conn: {e:#}"),
             AdapterError::Sleeping     => write!(f, "sleeping"),
-            AdapterError::Permanent(e) => write!(f, "permanent: {e:#}"),
         }
     }
 }
