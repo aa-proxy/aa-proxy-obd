@@ -3,7 +3,6 @@ use clap::builder::styling::{AnsiColor, Styles};
 use clap::Parser;
 use log::info;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 mod adapter;
@@ -111,12 +110,12 @@ async fn main() -> anyhow::Result<()> {
         cfg.daemon.bridge_dropouts,
     );
 
-    let running = Arc::new(AtomicBool::new(true));
+    let shutdown = Arc::new(scheduler::Shutdown::new());
     {
-        let r = running.clone();
-        ctrlc::set_handler(move || r.store(false, Ordering::SeqCst))
+        let s = shutdown.clone();
+        ctrlc::set_handler(move || s.trigger())
             .expect("Ctrl-C handler");
     }
 
-    scheduler::run(adapter, cfg.daemon, publisher, running).await
+    scheduler::run(adapter, cfg.daemon, publisher, shutdown).await
 }

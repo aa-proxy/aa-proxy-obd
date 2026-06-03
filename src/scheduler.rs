@@ -8,6 +8,48 @@ use log::{error, info, warn};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::sync::Notify;
+
+/// Cooperative shutdown signal. `trigger()` flips an AtomicBool (for cheap
+/// synchronous polling) and wakes every waiter on the Notify (for async
+/// `select!` against long-running operations). `wait()` resolves immediately
+/// if shutdown has already been triggered, otherwise parks until it is.
+pub struct Shutdown {
+    running: AtomicBool,
+    notify:  Notify,
+}
+
+impl Shutdown {
+    pub fn new() -> Self {
+        Self { running: AtomicBool::new(true), notify: Notify::new() }
+    }
+
+    pub fn is_running(&self) -> bool {
+        self.running.load(Ordering::SeqCst)
+    }
+
+    pub fn trigger(&self) {
+        self.running.store(false, Ordering::SeqCst);
+        self.notify.notify_waiters();
+    }
+
+    /// Future that completes the moment `trigger()` has been (or is) called.
+    /// Race-free: registers interest in the Notify before reading the bool so
+    /// a trigger between the two cannot be missed.
+    pub async fn wait(&self) {
+        let notified = self.notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if !self.is_running() {
+            return;
+        }
+        notified.await;
+    }
+}
+
+impl Default for Shutdown {
+    fn default() -> Self { Self::new() }
+}
 
 /// Returns true if the cycle-health watchdog should fire.
 pub fn watchdog_should_fire(count: u32, limit: u32) -> bool {
@@ -18,7 +60,7 @@ pub async fn run(
     mut adapter: Box<dyn Adapter>,
     daemon: DaemonSection,
     publisher: Publisher,
-    running: Arc<AtomicBool>,
+    shutdown: Arc<Shutdown>,
 ) -> anyhow::Result<()> {
     let poll_interval = Duration::from_secs_f32(daemon.poll_interval_secs);
     let sleep_interval = Duration::from_secs_f32(daemon.car_sleep_interval_secs);
@@ -27,27 +69,46 @@ pub async fn run(
     let limit = daemon.cycle_failure_limit;
 
     'connect: loop {
-        if !running.load(Ordering::SeqCst) {
+        if !shutdown.is_running() {
             info!("shutdown requested");
             adapter.disconnect().await;
             break;
         }
-        if let Err(e) = adapter.connect().await {
+        let connect_res = tokio::select! {
+            biased;
+            _ = shutdown.wait() => { adapter.disconnect().await; break 'connect; }
+            r = adapter.connect() => r,
+        };
+        if let Err(e) = connect_res {
             info!("connect failed ({e}); retrying in {:?}", poll_interval);
-            tokio::time::sleep(poll_interval).await;
+            tokio::select! {
+                biased;
+                _ = shutdown.wait() => { adapter.disconnect().await; break 'connect; }
+                _ = tokio::time::sleep(poll_interval) => {}
+            }
             continue 'connect;
         }
 
         loop {
-            if !running.load(Ordering::SeqCst) {
+            if !shutdown.is_running() {
                 adapter.disconnect().await;
                 break 'connect;
             }
-            if Instant::now() < poll_deadline {
-                tokio::time::sleep(Duration::from_millis(30)).await;
+            let now = Instant::now();
+            if now < poll_deadline {
+                tokio::select! {
+                    biased;
+                    _ = shutdown.wait() => { adapter.disconnect().await; break 'connect; }
+                    _ = tokio::time::sleep(poll_deadline - now) => {}
+                }
                 continue;
             }
-            match adapter.poll().await {
+            let poll_res = tokio::select! {
+                biased;
+                _ = shutdown.wait() => { adapter.disconnect().await; break 'connect; }
+                r = adapter.poll() => r,
+            };
+            match poll_res {
                 Ok(metrics) => {
                     // Drive the watchdog from whether the adapter produced data,
                     // not from publish success: a healthy adapter whose endpoint
@@ -108,5 +169,26 @@ mod tests {
     #[test]
     fn watchdog_disabled_when_limit_zero() {
         assert!(!watchdog_should_fire(9999, 0));
+    }
+
+    #[tokio::test]
+    async fn shutdown_wait_returns_immediately_after_trigger() {
+        let s = Shutdown::new();
+        s.trigger();
+        // Should resolve essentially instantly; the test framework's default
+        // timeout will catch a hang.
+        s.wait().await;
+        assert!(!s.is_running());
+    }
+
+    #[tokio::test]
+    async fn shutdown_wait_resolves_when_triggered_concurrently() {
+        let s = Arc::new(Shutdown::new());
+        let s2 = s.clone();
+        let waiter = tokio::spawn(async move { s2.wait().await; });
+        // Give the waiter a tick to register interest.
+        tokio::task::yield_now().await;
+        s.trigger();
+        waiter.await.unwrap();
     }
 }
