@@ -61,7 +61,8 @@ impl Adapter for BluetoothElm327Adapter {
         let connect_timeout = Duration::from_secs(self.timeout_secs as u64);
         let mut connected = None;
         for attempt in 1..=self.max_retries {
-            info!("Connecting to {:?} (attempt {}/{})", self.target, attempt, self.max_retries);
+            info!("Connecting to {} ch {} (attempt {}/{})",
+                self.target.addr, self.target.channel, attempt, self.max_retries);
             match timeout(connect_timeout, Stream::connect(self.target)).await {
                 Ok(Ok(s)) => { connected = Some(s); break; }
                 Ok(Err(e)) => warn!("BT connect attempt {attempt} failed: {e}"),
