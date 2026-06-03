@@ -8,6 +8,7 @@ use async_trait::async_trait;
 use bluer::{rfcomm::{SocketAddr, Stream}, Address};
 use log::{debug, info, warn};
 use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::timeout;
 
 pub struct BluetoothElm327Adapter {
@@ -59,34 +60,59 @@ impl Adapter for BluetoothElm327Adapter {
             self._agent_handle = Some(handle);
         }
         let connect_timeout = Duration::from_secs(self.timeout_secs as u64);
-        let mut connected = None;
+        let mut connected: Option<Stream> = None;
         for attempt in 1..=self.max_retries {
             info!("Connecting to {} ch {} (attempt {}/{})",
                 self.target.addr, self.target.channel, attempt, self.max_retries);
-            match timeout(connect_timeout, Stream::connect(self.target)).await {
-                Ok(Ok(s)) => { connected = Some(s); break; }
-                Ok(Err(e)) => warn!("BT connect attempt {attempt} failed: {e}"),
-                Err(_) => warn!("BT connect attempt {attempt} timed out after {}s", self.timeout_secs),
+            let mut candidate = match timeout(connect_timeout, Stream::connect(self.target)).await {
+                Ok(Ok(s)) => s,
+                Ok(Err(e)) => {
+                    warn!("BT connect attempt {attempt} failed: {e}");
+                    if attempt < self.max_retries {
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                    }
+                    continue;
+                }
+                Err(_) => {
+                    warn!("BT connect attempt {attempt} timed out after {}s", self.timeout_secs);
+                    if attempt < self.max_retries {
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                    }
+                    continue;
+                }
+            };
+
+            // bluer local-address workaround
+            // https://github.com/bluez/bluer/discussions/130#discussioncomment-8845113
+            let mut i = 0;
+            while candidate.as_ref().local_addr()
+                .map(|a| a.addr == bluer::Address::any()).unwrap_or(false)
+            {
+                debug!("Waiting for local address...");
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                i += 1;
+                if i > 5 { break; }
             }
-            if attempt < self.max_retries {
-                tokio::time::sleep(Duration::from_secs(2)).await;
+
+            // RFCOMM connect() returns Ok as soon as BlueZ accepts the local
+            // socket; remote-side reachability is only revealed by the first
+            // I/O. Probe the link with a bare CR before declaring success so
+            // a dead peer surfaces here, not as a misleading "init step 'ATZ'
+            // failed" downstream.
+            if let Err(e) = probe_rfcomm_link(&mut candidate).await {
+                warn!("BT link probe attempt {attempt} failed: {e}");
+                if attempt < self.max_retries {
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                }
+                continue;
             }
+
+            connected = Some(candidate);
+            break;
         }
         let stream = connected.ok_or_else(|| {
             AdapterError::FatalConn(anyhow!("BT connect failed after {} attempts", self.max_retries))
         })?;
-
-        // bluer local-address workaround
-        // https://github.com/bluez/bluer/discussions/130#discussioncomment-8845113
-        let mut i = 0;
-        while stream.as_ref().local_addr()
-            .map(|a| a.addr == bluer::Address::any()).unwrap_or(false)
-        {
-            debug!("Waiting for local address...");
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            i += 1;
-            if i > 5 { break; }
-        }
 
         let init: Vec<String> = self.profile.elm327.as_ref()
             .and_then(|e| e.init.clone())
@@ -152,4 +178,16 @@ impl Adapter for BluetoothElm327Adapter {
         }
         Ok(metrics)
     }
+}
+
+// Send a bare CR and drain whatever comes back. A live ELM327 echoes a fresh
+// '>' prompt; a dead peer fails the write immediately with HostDown/BrokenPipe
+// /NotConnected. Drain so the stale prompt doesn't shift the next send_cmd's
+// read by one response.
+async fn probe_rfcomm_link(stream: &mut Stream) -> std::io::Result<()> {
+    timeout(Duration::from_secs(2), stream.write_all(b"\r")).await
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "probe write timed out"))??;
+    let mut buf = [0u8; 256];
+    let _ = timeout(Duration::from_millis(500), stream.read(&mut buf)).await;
+    Ok(())
 }
