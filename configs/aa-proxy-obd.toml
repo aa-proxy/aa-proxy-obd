@@ -1,0 +1,41 @@
+# Example configuration:
+#
+# [device]
+# type                      = "bluetooth"                # bluetooth | usb | wican
+#
+# bt_mac                    = "AA:BB:CC:DD:EE:FF"        # bluetooth + wican; the adapter's MAC
+# bt_passkey                = 1234                       # optional; enables in-process pairing
+# bt_max_connect_retries    = 5                          # bluetooth + wican
+# bt_timeout_secs           = 10                         # bluetooth + wican; per-attempt connect/response timeout
+#
+# usb_port                  = "/dev/ttyUSB0"             # ls -l /dev/ttyUSB* /dev/ttyACM* 2>/dev/null
+# usb_baud                  = 115200
+
+# [vehicle]
+# profile                   = "ev6"                      # ignored when device.type = "wican"
+# battery_capacity_wh       = 77400                      # optional; enables derived battery_level_wh
+
+# [daemon]
+# poll_interval_secs        = 10
+# car_sleep_interval_secs   = 100                        # poll interval while the car is asleep
+# log_level                 = "info"                     # off | error | warn | info | debug | trace
+# log_file                  = "/var/log/aa-proxy-obd.log"
+# api_base_url              = "http://localhost"
+# bridge_dropouts           = true
+# publish_failure_threshold = 5
+# publish_breaker_secs      = 300
+# cycle_failure_limit       = 20
+#
+# Notes:
+# - battery_capacity_wh enables derived battery_level_wh.
+# - bt_passkey enables automatic pairing.
+# - profile is ignored when device.type = "wican".
+
+[device]
+type                      = "bluetooth"                # bluetooth | usb | wican
+
+bt_mac                    = "AA:BB:CC:DD:EE:FF"        # bluetooth + wican; the adapter's MAC
+bt_passkey                = 1234                       # optional; enables in-process pairing
+
+[vehicle]
+profile                   = "ioniq5"                   # ignored when device.type = "wican"
