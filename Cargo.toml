@@ -22,7 +22,21 @@ ctrlc = { version = "3.4", features = ["termination"] }
 clap = { version = "4.5", features = ["derive"] }
 tokio = { version = "1.36", features = ["full"] }
 tokio-serial = "5.4"
-bluer = { version = "0.17", features = ["full"] }
+# Bluetooth stack. bluer pulls in dbus -> libdbus-sys (FFI bindings to the C
+# libdbus). libdbus-sys is declared here despite never being imported directly:
+# Cargo feature unification then enables its `vendored` feature on the same crate
+# instance bluer uses. Vendored compiles libdbus from source and links it
+# statically, which is required when cross-compiling (e.g. aarch64) where
+# pkg-config cannot locate a target libdbus and the build otherwise fails with
+# "failed to run custom build command for libdbus-sys".
+#
+# bluer and dbus are pinned exactly so a `cargo update` cannot move libdbus-sys
+# onto a version that bluer's copy resolves separately, which would silently drop
+# the vendored feature. The committed Cargo.lock is the primary guarantee; these
+# pins are defence-in-depth.
+bluer = { version = "=0.17.4", features = ["full"] }
+dbus = "=0.9.11"
+libdbus-sys = { version = "0.2.7", features = ["vendored"] }
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
