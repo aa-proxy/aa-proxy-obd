@@ -33,7 +33,9 @@ struct Args {
     #[command(subcommand)]
     command: Option<Commands>,
 
+    /// Override the configured log level to debug
     #[arg(short, long)] debug: bool,
+    /// Config file path
     #[arg(short, long, default_value = "/etc/aa-proxy-obd.toml")] config: PathBuf,
 }
 
