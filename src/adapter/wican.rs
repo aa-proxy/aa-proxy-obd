@@ -72,7 +72,7 @@ impl WicanAdapter {
         if device.is_paired().await? { return Ok(()); }
         if let Some(pk) = self.passkey {
             let session = self.session.as_ref().context("session missing")?;
-            self._agent_handle = Some(register_passkey_agent(session, pk).await?);
+            self._agent_handle = Some(register_passkey_agent(session, pk, self.mac).await?);
         }
         device.pair().await.context("pair failed")
     }

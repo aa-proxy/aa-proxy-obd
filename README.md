@@ -202,7 +202,7 @@ When both `bit_offset`/`bit_length` and `byte_index`/`length` are present, the b
 4. Point `profile = <name>` at it in the config. No code changes required.
 
 ## Bluetooth pairing
-If `[device].bt_passkey` is set, the daemon registers a [BlueZ](https://github.com/bluez/bluez) agent at connect time that supplies the passkey during first pairing (this applies to both the `bluetooth` and `wican` device types). BlueZ ignores the agent for already-paired devices.
+If `[device].bt_passkey` is set, the daemon registers a [BlueZ](https://github.com/bluez/bluez) agent at connect time that supplies the passkey during first pairing (this applies to both the `bluetooth` and `wican` device types). The agent answers only the configured `bt_mac`, and a passkey above 999999, outside the six-digit range Bluetooth uses, is rejected when the agent is registered. BlueZ ignores the agent for already-paired devices.
 
 For one-shot setup:
 ```sh

@@ -55,7 +55,7 @@ impl Adapter for BluetoothElm327Adapter {
         if let (Some(pk), None) = (self.bt_passkey, self._agent_handle.as_ref()) {
             let session = bluer::Session::new().await
                 .map_err(|e| AdapterError::FatalConn(anyhow!("bluer session: {e}")))?;
-            let handle = crate::adapter::pairing::register_passkey_agent(&session, pk).await
+            let handle = crate::adapter::pairing::register_passkey_agent(&session, pk, self.target.addr).await
                 .map_err(AdapterError::FatalConn)?;
             self.bluer_session = Some(session);
             self._agent_handle = Some(handle);

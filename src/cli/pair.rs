@@ -39,7 +39,7 @@ pub async fn run(config_path: &Path, passkey_arg: Option<u32>) -> Result<()> {
     };
 
     let session = Session::new().await.context("bluer Session::new")?;
-    let _handle = register_passkey_agent(&session, passkey).await?;
+    let _handle = register_passkey_agent(&session, passkey, mac).await?;
     let adapter = session.default_adapter().await.context("default adapter")?;
 
     // Discover the device if BlueZ doesn't already know it. (adapter.device()
