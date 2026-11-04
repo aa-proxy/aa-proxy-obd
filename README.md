@@ -220,7 +220,7 @@ cargo build --release
 The vendored [`.cargo/config.toml`](.cargo/config.toml) defaults the target to `aarch64-unknown-linux-gnu` so the release build cross-compiles for common SBCs (e.g. Radxa Zero 3W running an [aa-proxy-rs](https://github.com/aa-proxy/aa-proxy-rs) image). Run the test suite on the host with `cargo test --target <host-triple>`.
 
 ## License
-GPL-2.0. See [`LICENSE`](LICENSE).
+GPL-2.0-only. See [`LICENSE`](LICENSE).
 
 ## Credits
 - Original [`manio/canze-rs`](https://github.com/manio/canze-rs.git) by Mariusz Białończyk — the Renault Zoe SOC logger and TPMS/multiframe work this fork builds on.
