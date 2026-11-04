@@ -100,7 +100,62 @@ fn write_passkey_to_config(path: &Path, key_name: &str, passkey: u32) -> Result<
         doc["device"] = toml_edit::Item::Table(toml_edit::Table::new());
     }
     doc["device"][key_name] = toml_edit::value(passkey as i64);
-    std::fs::write(path, doc.to_string()).context("write config")?;
+    write_atomic(path, doc.to_string().as_bytes()).context("write config")
+}
+
+/// Replace `path` with `contents` through a temporary file in the same
+/// directory: the data is synced, the original permissions are applied, and the
+/// file is renamed over the original so readers see either the old or the new
+/// content. A symlinked path is resolved first, so the link target is replaced
+/// and the link itself is kept. Owner and group are carried over where the
+/// process is allowed to set them.
+fn write_atomic(path: &Path, contents: &[u8]) -> Result<()> {
+    let resolved = std::fs::canonicalize(path).context("resolve config path")?;
+    let path = resolved.as_path();
+    let dir = match path.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d,
+        _ => Path::new("."),
+    };
+    let name = path.file_name().ok_or_else(|| anyhow!("config path has no file name"))?;
+    let metadata = std::fs::metadata(path).context("read config metadata")?;
+    let permissions = metadata.permissions();
+    let mut tmp_name = std::ffi::OsString::from(".");
+    tmp_name.push(name);
+    tmp_name.push(format!(".tmp{}", std::process::id()));
+    let tmp = dir.join(tmp_name);
+
+    let result = (|| -> Result<()> {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+            .context("create temp file")?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{fchown, MetadataExt};
+            // Changing the owner needs privileges; without them the new file
+            // keeps the current user as owner.
+            if let Err(e) = fchown(&file, Some(metadata.uid()), Some(metadata.gid())) {
+                if e.kind() != std::io::ErrorKind::PermissionDenied {
+                    return Err(anyhow::Error::new(e).context("set temp file owner"));
+                }
+            }
+        }
+        file.set_permissions(permissions).context("set temp file permissions")?;
+        file.write_all(contents).context("write temp file")?;
+        file.sync_all().context("sync temp file")?;
+        drop(file);
+        std::fs::rename(&tmp, path).context("rename temp file over config")?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        return result;
+    }
+    #[cfg(unix)]
+    if let Err(e) = std::fs::File::open(dir).and_then(|d| d.sync_all()) {
+        warn!("config replaced but the directory sync failed: {e}");
+    }
     Ok(())
 }
 
@@ -122,10 +177,90 @@ mod tests {
         assert!(after.contains("bt_passkey = 1234"), "key not written");
     }
 
-    fn tempdir_or_panic() -> std::path::PathBuf {
-        let p = std::env::temp_dir().join(format!("aa-proxy-obd-test-{}", std::process::id()));
+    #[test]
+    fn write_atomic_keeps_mode_and_leaves_no_temp_file() {
+        let dir = tempdir_or_panic();
+        let path = dir.join("cfg.toml");
+        std::fs::write(&path, "old").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+
+        write_atomic(&path, b"new content").unwrap();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new content");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+        let entries: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(entries, vec![std::ffi::OsString::from("cfg.toml")]);
+    }
+
+    #[test]
+    fn unparseable_config_leaves_original_untouched() {
+        let dir = tempdir_or_panic();
+        let path = dir.join("cfg.toml");
+        let bad = "[device
+not toml";
+        std::fs::write(&path, bad).unwrap();
+
+        assert!(write_passkey_to_config(&path, "bt_passkey", 1).is_err());
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), bad);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_atomic_writes_through_a_symlink() {
+        use std::os::unix::fs::PermissionsExt;
+        let real_dir = tempdir_or_panic();
+        let link_dir = tempdir_or_panic();
+        let target = real_dir.join("real.toml");
+        let link = link_dir.join("link.toml");
+        std::fs::write(&target, "old").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o640)).unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        write_atomic(&link, b"new content").unwrap();
+
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "new content");
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o640);
+        assert_eq!(std::fs::read_dir(&real_dir).unwrap().count(), 1);
+        assert_eq!(std::fs::read_dir(&link_dir).unwrap().count(), 1);
+    }
+
+    /// A scratch directory under the system temp dir, removed when dropped
+    /// (also when the test panics).
+    struct TempDir(std::path::PathBuf);
+
+    impl std::ops::Deref for TempDir {
+        type Target = std::path::Path;
+        fn deref(&self) -> &std::path::Path { &self.0 }
+    }
+
+    impl AsRef<std::path::Path> for TempDir {
+        fn as_ref(&self) -> &std::path::Path { &self.0 }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
+    }
+
+    fn tempdir_or_panic() -> TempDir {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static NEXT: AtomicU32 = AtomicU32::new(0);
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        let p = std::env::temp_dir().join(format!("aa-proxy-obd-test-{}-{}", std::process::id(), n));
         let _ = std::fs::remove_dir_all(&p);
         std::fs::create_dir_all(&p).unwrap();
-        p
+        TempDir(p)
     }
 }
