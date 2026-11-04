@@ -11,7 +11,7 @@ MAP = {
   'BATTERY_DC_VOLTAGE': ('battery_voltage', 1), 'BATTERY_CURRENT': ('battery_current', 1),
   'HVBAT_CURR': ('battery_current', 1), 'HVAC_AAT': ('external_temp_celsius', 1),
   'HVBAT_VDC': ('battery_voltage', 1), 'TEMP_INT': ('interior_temp_celsius', 1),
-  'TEMP_EXT': ('external_temp_celsius', 1), 'ODO_KM': ('odometer_km', 1),
+  'TEMP_EXT': ('external_temp_celsius', 1), 'ODO_KM': ('odometer_km', 1), 'ODO_MI': ('odometer_mi', 1),
   'TP_FL': ('tire_fl_kpa', PSI), 'TP_FR': ('tire_fr_kpa', PSI), 'TP_RL': ('tire_rl_kpa', PSI), 'TP_RR': ('tire_rr_kpa', PSI),
   'MG4_SOC': ('battery_level_percentage', 1), 'MG4_AAT': ('external_temp_celsius', 1),
   'ZOE_ODO': ('odometer_km', 1), 'ZOE_SOC_EVC': ('battery_level_percentage', 1),

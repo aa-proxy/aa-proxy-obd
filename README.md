@@ -46,7 +46,7 @@ While the adapter is reachable and the car is awake, the daemon polls and `POST`
 | Endpoint | Payload |
 |---|---|
 | `POST {api_base_url}/battery` | `battery_level_percentage`, `battery_level_wh`, `battery_capacity_wh`, `external_temp_celsius`, `battery_state_of_health`, `battery_voltage`, `battery_current`, `interior_temp_celsius` (all optional; sent only with `battery_level_percentage` or a Wh value, because aa-proxy-rs rejects a battery payload without either) |
-| `POST {api_base_url}/odometer` | `odometer_km`, `trip_km` (optional) |
+| `POST {api_base_url}/odometer` | `odometer_km`, `trip_km` (optional); on profiles that also read `odometer_mi` (`ev6`, `ioniq5`, `kona`), a car set to miles reports 0 km, so the miles reading is converted to km when the car reports km as 0 |
 | `POST {api_base_url}/tire-pressure` | `pressures_kpa[]` (FL, FR, RL, RR; sent only when `tire_fl_kpa` was read, missing positions are `0`) |
 | `POST {api_base_url}/raw-topic-data` | `{"topic": "<raw_topic>", "payload": "<JSON object of every metric read this cycle>"}`; only when `daemon.raw_topic` is set |
 
@@ -208,7 +208,7 @@ When both `bit_offset`/`bit_length` and `byte_index`/`length` are present, the b
 
 ### Recognised field names
 - **Battery:** `battery_level_percentage`, `battery_level_wh`, `external_temp_celsius`, `battery_state_of_health`, `battery_voltage`, `battery_current`, `interior_temp_celsius`
-- **Odometer:** `odometer_km`, `trip_km`
+- **Odometer:** `odometer_km`, `odometer_mi` (used only when `odometer_km` is 0), `trip_km`
 - **Tire pressure:** `tire_fl_kpa`, `tire_fr_kpa`, `tire_rl_kpa`, `tire_rr_kpa`
 
 ### Adding a vehicle profile

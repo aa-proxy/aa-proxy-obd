@@ -247,11 +247,21 @@ impl Publisher {
         })
     }
 
+    /// Odometer in km. Cars that show miles report 0 in `odometer_km` and the
+    /// reading in `odometer_mi`, so a positive km value wins, then a positive
+    /// miles value converted to km; with neither positive `odometer_km` is
+    /// sent as read. Non-finite values are never sent.
     pub fn build_odometer(&self, m: &Metrics) -> Option<OdometerData> {
-        m.get("odometer_km").map(|&odo| OdometerData {
-            odometer_km: odo,
-            trip_km: m.get("trip_km").copied(),
-        })
+        const KM_PER_MILE: f32 = 1.609344;
+        let km = m.get("odometer_km").copied().filter(|v| v.is_finite());
+        let mi = m.get("odometer_mi").copied().filter(|v| v.is_finite());
+        let odo = match (km, mi) {
+            (Some(k), _) if k > 0.0 => k,
+            (_, Some(mi)) if mi > 0.0 => mi * KM_PER_MILE,
+            (Some(k), _) => k,
+            _ => return None,
+        };
+        Some(OdometerData { odometer_km: odo, trip_km: m.get("trip_km").copied() })
     }
 
     pub fn build_tire_pressure(&self, m: &Metrics) -> Option<TirePressureData> {
@@ -469,6 +479,39 @@ mod tests {
         let m = metrics_with(&[("odometer_km", 12345.0)]);
         let d = p.build_odometer(&m).unwrap();
         assert_eq!(d.odometer_km, 12345.0);
+    }
+
+    #[test]
+    fn build_odometer_converts_miles_when_km_is_zero() {
+        let p = Publisher::new("http://test", None, 5, 300, true).unwrap();
+        let d = p.build_odometer(&metrics_with(&[("odometer_km", 0.0), ("odometer_mi", 1000.0)])).unwrap();
+        assert!((d.odometer_km - 1609.344).abs() < 0.01, "got {}", d.odometer_km);
+        let d = p.build_odometer(&metrics_with(&[("odometer_mi", 1000.0)])).unwrap();
+        assert!((d.odometer_km - 1609.344).abs() < 0.01, "got {}", d.odometer_km);
+    }
+
+    #[test]
+    fn build_odometer_prefers_km_when_both_are_present() {
+        let p = Publisher::new("http://test", None, 5, 300, true).unwrap();
+        let d = p.build_odometer(&metrics_with(&[("odometer_km", 20859.0), ("odometer_mi", 12961.0)])).unwrap();
+        assert_eq!(d.odometer_km, 20859.0);
+    }
+
+    #[test]
+    fn build_odometer_keeps_zero_km_when_both_are_zero() {
+        let p = Publisher::new("http://test", None, 5, 300, true).unwrap();
+        let d = p.build_odometer(&metrics_with(&[("odometer_km", 0.0), ("odometer_mi", 0.0)])).unwrap();
+        assert_eq!(d.odometer_km, 0.0);
+        assert!(p.build_odometer(&metrics_with(&[("odometer_mi", 0.0)])).is_none());
+    }
+
+    #[test]
+    fn build_odometer_never_sends_non_finite_values() {
+        let p = Publisher::new("http://test", None, 5, 300, true).unwrap();
+        assert!(p.build_odometer(&metrics_with(&[("odometer_km", f32::NAN)])).is_none());
+        assert!(p.build_odometer(&metrics_with(&[("odometer_mi", f32::INFINITY)])).is_none());
+        let d = p.build_odometer(&metrics_with(&[("odometer_km", f32::NAN), ("odometer_mi", 10.0)])).unwrap();
+        assert!(d.odometer_km.is_finite());
     }
 
     #[test]

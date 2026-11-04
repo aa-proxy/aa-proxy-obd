@@ -52,7 +52,8 @@
       "ecu_rx": "7CE",
       "pid": "22B002",
       "fields": [
-        {"name": "odometer_km", "byte_index": 6, "length": 3, "multiplier": 1.0, "offset": 0.0}
+        {"name": "odometer_km", "byte_index": 6, "length": 3, "multiplier": 1.0, "offset": 0.0},
+        {"name": "odometer_mi", "byte_index": 9, "length": 3, "multiplier": 1.0, "offset": 0.0}
       ]
     },
     {
