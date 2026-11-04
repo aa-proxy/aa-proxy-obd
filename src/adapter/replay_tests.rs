@@ -625,6 +625,10 @@ fn source_with(base: &UdsPidSource, multiframe: bool, fields: Vec<crate::profile
     UdsPidSource { multiframe, fields, ..base.clone() }
 }
 
+fn hex_string(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02X}")).collect::<Vec<_>>().join(" ")
+}
+
 /// Data bytes 7F 22 12 inside a positive reply are data, not a rejection.
 #[tokio::test(start_paused = true)]
 async fn positive_reply_containing_7f_22_12_decodes() {
@@ -645,6 +649,22 @@ async fn single_frame_negative_response_reports_the_code() {
     let ecu = Ecu::new(0x7E4, 0x7EC).respond_payload("222006", "7F 22 31");
     let r = replay_with(ecu, &uds).await;
     assert!(r.as_ref().is_err_and(|e| e.contains("rejected") && e.contains("31")), "{r:?}");
+}
+
+/// A 0x1A4-byte reply needs a three-digit length and more than 25 lines.
+#[tokio::test(start_paused = true)]
+async fn long_multiframe_reply_is_assembled_completely() {
+    let p = profile("zoe");
+    let uds = source_with(uds_source(&p, "222006"), true, vec![field("tail", 415, 2)]);
+    let mut payload = vec![0x62, 0x20, 0x06];
+    payload.extend((3..0x1A4).map(|i| (i % 200) as u8));
+    payload[0x1A4 - 2] = 0x12;
+    payload[0x1A4 - 1] = 0x34;
+    assert_eq!(payload.len(), 0x1A4);
+    let ecu = Ecu::new(0x7E4, 0x7EC).respond_payload("222006", &hex_string(&payload));
+    let r = replay_with(ecu, &uds).await;
+    let bad = compare("long", &r, &[("tail".to_string(), 4660.0)].into());
+    assert!(bad.is_empty(), "{}", bad.join("\n"));
 }
 
 /// Profile CAN-IDs are sent as written: 8 digits, with leading zeros kept.

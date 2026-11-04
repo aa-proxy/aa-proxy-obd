@@ -9,7 +9,6 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use std::io::{Error as IoError, ErrorKind};
-use tokio::io::AsyncReadExt;
 use tokio::time::timeout;
 
 /// Default ELM327 initialisation sequence. A profile may override it via
@@ -21,6 +20,12 @@ pub const DEFAULT_INIT: &[&str] = &[
 const EOM_PROMPT: u8 = b'>';
 const SEND_CMD_TIMEOUT: Duration = Duration::from_millis(5000);
 const RESYNC_TIMEOUT: Duration = Duration::from_secs(2);
+/// Line cap for one multi-line reply: a length line, a first line of 6 bytes
+/// and 7-byte lines up to the 0xFFF-byte ISO-TP maximum, with margin.
+const MAX_REPLY_LINES: usize = 600;
+/// Overall time allowed for one multi-line reply, from the request write.
+const REPLY_DEADLINE: Duration = Duration::from_secs(10);
+const REPLY_LINE_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// ATSH, ATCRA and ATFCSH take 3, 6 or 8 hex digits.
 fn check_can_id(cmd: &str, id: &str) -> Result<()> {
@@ -149,6 +154,42 @@ where
         false
     }
 
+    /// Read a single line (terminated by \r or \n) with a per-read timeout.
+    /// Returns the line bytes excluding the terminator; bytes after it stay
+    /// buffered. A timeout with nothing read is an error.
+    async fn read_line(&mut self, millis: u64) -> std::io::Result<Vec<u8>> {
+        let mut out = Vec::new();
+        loop {
+            let (used, done) = match timeout(Duration::from_millis(millis), self.stream.fill_buf()).await {
+                Ok(Ok([])) => break,
+                Ok(Ok(b)) => {
+                    let mut used = 0;
+                    let mut done = false;
+                    for &c in b {
+                        used += 1;
+                        if c == b'\r' || c == b'\n' {
+                            if !out.is_empty() { done = true; break; }
+                        } else {
+                            out.push(c);
+                            if out == [EOM_PROMPT] { done = true; break; }
+                        }
+                    }
+                    (used, done)
+                }
+                Ok(Err(e)) => return Err(e),
+                Err(_) => {
+                    if out.is_empty() {
+                        return Err(std::io::Error::new(ErrorKind::TimedOut, "line read timeout"));
+                    }
+                    break;
+                }
+            };
+            self.stream.consume(used);
+            if done { break; }
+        }
+        Ok(out)
+    }
+
     /// Send ATE0 and require "OK". A missing reply or one without "OK" (the
     /// chip drops input while it resets) is retried once after a drain.
     async fn send_ate0(&mut self, cmd: &str) -> Result<()> {
@@ -262,11 +303,17 @@ where
         self.stream.write_all(cmd.as_bytes()).await
             .context("multiframe PID write")?;
 
+        let service = uds.pid.get(..2).and_then(|s| u8::from_str_radix(s, 16).ok());
+
         let mut lines: Vec<Vec<u8>> = Vec::new();
         let mut saw_prompt = false;
+        let deadline = tokio::time::Instant::now() + REPLY_DEADLINE;
 
-        for _ in 0..25 {
-            let line = match read_line_raw(&mut self.stream, 500).await {
+        for _ in 0..MAX_REPLY_LINES {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() { break; }
+            let wait = REPLY_LINE_TIMEOUT.min(remaining);
+            let line = match self.read_line(wait.as_millis().max(1) as u64).await {
                 Ok(l) => l,
                 Err(e) if e.kind() == ErrorKind::TimedOut => break,
                 Err(e) => {
@@ -280,7 +327,7 @@ where
                 break;
             }
             if trimmed.is_empty() { break; }
-            if trimmed.contains("NO DATA") || trimmed.contains("7F") {
+            if trimmed.contains("NO DATA") || is_negative_response(&trimmed, service) {
                 // The line ended at its CR; consume the reply's prompt so
                 // ATH0 reads its own reply.
                 self.read_until_prompt(Duration::from_secs(2)).await;
@@ -345,7 +392,7 @@ where
         let mut prompt_seen = false;
 
         while tokio::time::Instant::now() < deadline {
-            match read_line_raw(&mut self.stream, 200).await {
+            match self.read_line(200).await {
                 Ok(b) => {
                     consecutive_timeouts = 0;
                     let ascii = String::from_utf8_lossy(&b).into_owned();
@@ -444,6 +491,18 @@ fn hex_bytes(data: &str) -> Vec<u8> {
             .filter_map(|p| u8::from_str_radix(p, 16).ok())
             .collect()
     }
+}
+
+/// True when a reply line is a UDS negative response: 7F, then the requested
+/// service id, then the response code ("7F 21 12", or "7F2112" with ATS0). When
+/// the request has no parsable service id, 7F followed by any second byte
+/// qualifies. A negative response is always a single frame, so a line carrying an "N:"
+/// multi-frame index is data and never matches, whatever bytes it holds.
+// MSRV: avoids APIs newer than Rust 1.80
+#[allow(clippy::unnecessary_map_or)]
+fn is_negative_response(line: &str, service: Option<u8>) -> bool {
+    if line.contains(':') { return false; }
+    matches!(hex_bytes(line.trim()).get(..2), Some([0x7F, s]) if service.map_or(true, |sv| sv == *s))
 }
 
 /// Strip ELM327 framing from a raw response string and return the UDS payload
@@ -547,79 +606,43 @@ pub fn extract_value(payload: &[u8], field: &FieldSpec) -> Option<f32> {
     Some(raw * field.multiplier + field.offset)
 }
 
-/// Read a single line (terminated by \r or \n) from the stream, with a
-/// per-read timeout. Returns the line bytes excluding the terminator.
-pub async fn read_line_raw<T>(stream: &mut T, millis: u64) -> std::io::Result<Vec<u8>>
-where T: tokio::io::AsyncRead + Unpin,
-{
-    let mut out = Vec::new();
-    let mut byte = [0u8; 1];
-    loop {
-        match timeout(Duration::from_millis(millis), stream.read(&mut byte)).await {
-            Ok(Ok(0)) => break,
-            Ok(Ok(_)) => {
-                if byte[0] == b'\r' || byte[0] == b'\n' {
-                    if !out.is_empty() { break; }
-                } else {
-                    out.push(byte[0]);
-                }
-            }
-            Ok(Err(e)) => return Err(e),
-            Err(_) => {
-                if out.is_empty() {
-                    return Err(std::io::Error::new(ErrorKind::TimedOut, "line read timeout"));
-                }
-                break;
-            }
-        }
-    }
-    Ok(out)
-}
-
 /// Reassemble an ELM327 multi-line UDS response. With headers off and
 /// automatic flow control, the adapter emits an optional total-length line
-/// followed by data lines; non-hex tokens (line counters, the ">" prompt) are
-/// filtered out by the hex parse. The first data line is taken wholesale; a
-/// genuine 0x2N consecutive frame has its sequence byte stripped. The UDS
-/// response header is retained, matching the single-frame path.
+/// (three hex digits, e.g. "1A4") followed by data lines. The line counter
+/// ("0:", "1:") carries no PCI byte and is split off, so every byte after it
+/// is data. With spaces on a line is 2-digit tokens; with spaces off it is a
+/// run of hex pairs. The reply stops at the declared length when there is one,
+/// and fewer bytes than declared is an incomplete reply (None); without a
+/// length line all data lines are used. The UDS response header is retained,
+/// matching the single-frame path.
 pub fn assemble_iso_tp(lines: &[Vec<u8>]) -> Option<Vec<u8>> {
     let mut payload: Vec<u8> = Vec::new();
     let mut expected_len: Option<usize> = None;
-    let mut first_line = true;
     let mut got_data = false;
 
     for line in lines {
         let ascii = String::from_utf8_lossy(line);
-        let bytes: Vec<u8> = ascii
-            .split_whitespace()
-            .filter_map(|t| u8::from_str_radix(t, 16).ok())
-            .collect();
-        if bytes.is_empty() { continue; }
-
-        if first_line {
-            if bytes.len() == 1 {
-                // bare total-length header (e.g. ELM prints "012")
-                expected_len = Some(bytes[0] as usize);
-            } else {
-                // first data line — taken wholesale (no PCI pair to strip)
-                expected_len = expected_len.or(Some(18));
-                payload.extend_from_slice(&bytes);
-                first_line = false;
-                got_data = true;
-            }
-        } else {
-            // consecutive frame: strip the 0x2N sequence byte if present
-            if bytes.len() > 1 && (bytes[0] & 0xF0) == 0x20 {
-                payload.extend_from_slice(&bytes[1..]);
-            } else {
-                payload.extend_from_slice(&bytes);
+        let trimmed = ascii.trim();
+        if !got_data && expected_len.is_none() && trimmed.len() == 3 {
+            if let Ok(n) = usize::from_str_radix(trimmed, 16) {
+                expected_len = Some(n);
+                continue;
             }
         }
+        let data = trimmed.split_once(':').map_or(trimmed, |(_, rest)| rest.trim());
+        let bytes = hex_bytes(data);
+        if bytes.is_empty() { continue; }
+        payload.extend_from_slice(&bytes);
+        got_data = true;
         if let Some(exp) = expected_len {
-            if got_data && payload.len() >= exp { break; }
+            if payload.len() >= exp {
+                payload.truncate(exp);
+                break;
+            }
         }
     }
     if !got_data { return None; }
+    if expected_len.is_some_and(|exp| payload.len() < exp) { return None; }
     Some(payload) // header retained; the field extractor applies its own offset
 }
 
@@ -754,6 +777,22 @@ mod tests {
     }
 
     #[test]
+    fn negative_response_needs_7f_then_the_service_byte() {
+        assert!(is_negative_response("7F 21 12", Some(0x21)));
+        assert!(is_negative_response("7F2112", Some(0x21)));
+        assert!(!is_negative_response("0: 61 74 7F 21", Some(0x21)));
+        assert!(!is_negative_response("1: 7F 21 00", Some(0x21)));
+        assert!(!is_negative_response("7F 22 12", Some(0x21)));
+        assert!(is_negative_response("7F 21 12", None));
+        assert!(!is_negative_response("012", Some(0x21)));
+        assert!(!is_negative_response("NO DATA", Some(0x21)));
+        assert!(!is_negative_response("?", Some(0x21)));
+        assert!(!is_negative_response("STOPPED", Some(0x21)));
+        assert!(is_negative_response("7F 21 78", Some(0x21)));
+        assert!(!is_negative_response("0:6174 7F21", Some(0x21)));
+    }
+
+    #[test]
     fn drop_nulls_keeps_payload_decodable() {
         let mut buf = b"62 20\0 06 02 15 04 \r\r>".to_vec();
         drop_nulls(&mut buf);
@@ -821,14 +860,43 @@ mod tests {
     }
 
     #[test]
-    fn assemble_iso_tp_strips_consecutive_pci_nibble() {
+    fn assemble_iso_tp_keeps_0x2n_data_bytes_on_continuation_lines() {
         let lines = vec![
-            b"10 0A 61 74 11 22 33 44".to_vec(), // first line wholesale (incl 10 0A)
-            b"21 55 66 77 88 99 AA".to_vec(),     // 0x2N consecutive -> strip seq byte
+            b"010".to_vec(),
+            b"0: 61 74 11 22 33 44".to_vec(),
+            b"1: 21 55 66 77 88 99 AA".to_vec(),
+            b"2: 2F 00 00".to_vec(),
         ];
         let p = assemble_iso_tp(&lines).expect("payload");
-        assert_eq!(&p[0..4], &[0x10, 0x0A, 0x61, 0x74]);
-        assert_eq!(&p[8..14], &[0x55, 0x66, 0x77, 0x88, 0x99, 0xAA]);
+        assert_eq!(p, vec![0x61, 0x74, 0x11, 0x22, 0x33, 0x44, 0x21, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0x2F, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn assemble_iso_tp_without_length_line_uses_all_lines() {
+        let lines: Vec<Vec<u8>> = vec![
+            b"0: 61 74 00 01 02 03".to_vec(),
+            b"1: 04 05 06 07 08 09 0A".to_vec(),
+            b"2: 0B 0C 0D 0E 0F 10 11".to_vec(),
+            b"3: 12 13 14 15 16 17 18".to_vec(),
+        ];
+        assert_eq!(assemble_iso_tp(&lines).expect("payload").len(), 27);
+    }
+
+    #[test]
+    fn assemble_iso_tp_short_reply_is_incomplete() {
+        let lines = vec![b"014".to_vec(), b"0: 61 74 00 01 02 03".to_vec(), b"1: 04 05 06 07 08 09 0A".to_vec()];
+        assert!(assemble_iso_tp(&lines).is_none());
+    }
+
+    #[test]
+    fn assemble_iso_tp_decodes_lines_without_spaces() {
+        let lines = vec![
+            b"00D".to_vec(),
+            b"0:7F2112AABBCC".to_vec(),
+            b"1:2001020304050607".to_vec(),
+        ];
+        let p = assemble_iso_tp(&lines).expect("payload");
+        assert_eq!(p, vec![0x7F, 0x21, 0x12, 0xAA, 0xBB, 0xCC, 0x20, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06]);
     }
 
     #[test]
