@@ -127,6 +127,8 @@ The `wican` device type connects over Bluetooth, so it shares the `bt_*` options
 
 The config is validated at load and a failure exits with code 1 and a message naming the key. `poll_interval_secs` and `car_sleep_interval_secs` must be finite and at least 0.1; `usb_baud` must be at least 1; `bt_mac` must not be the placeholder `AA:BB:CC:DD:EE:FF` shown in the examples above, so set it to the adapter's MAC. Unknown keys (for example a misspelled `poll_intervall_secs`) are logged as warnings and ignored.
 
+Profiles are validated the same way when loaded: `vehicle.profile` may contain only `a-z`, `0-9`, `_`, `-` and `.` (no `..` or path separators), ECU IDs must be 3, 6 or 8 hex digits, PIDs hex with an even length, and each field needs a complete `byte_index`+`length` pair (length 1 to 3, or 1 to 2 in broadcast frames) or `bit_offset`+`bit_length` pair (length 1 to 16); when both are set the bit pair is used. Broadcast sources need `deadline_ms` > 0, with `can_id` of 3 or 8 hex digits.
+
 ## Vehicle profiles
 Profile JSON files ship under [`profiles/`](profiles/). At install time, copy them to `/etc/aa-proxy-obd/<profile>.json` (e.g. `profiles/ev6.json` → `/etc/aa-proxy-obd/ev6.json`). The daemon lowercases `vehicle.profile` before building the path, so the file name must be lowercase.
 
