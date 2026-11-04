@@ -83,12 +83,25 @@ fn render_markup(line: &str, colorize: bool) -> String {
     out
 }
 
-pub fn init(log_level: &str, log_file: &str, debug_override: bool) {
-    let level = if debug_override {
-        LevelFilter::Debug
-    } else {
-        LevelFilter::from_str(log_level).unwrap_or(LevelFilter::Info)
-    };
+const FALLBACK_LEVEL: LevelFilter = LevelFilter::Info;
+
+/// Resolves the configured level. The second value is a warning to emit once
+/// the logger is installed when `log_level` could not be parsed.
+fn resolve_level(log_level: &str, debug_override: bool) -> (LevelFilter, Option<String>) {
+    match LevelFilter::from_str(log_level) {
+        Ok(l) => (if debug_override { LevelFilter::Debug } else { l }, None),
+        Err(_) => (
+            if debug_override { LevelFilter::Debug } else { FALLBACK_LEVEL },
+            Some(format!(
+                "invalid log_level '{log_level}'; using '{}' (valid: off, error, warn, info, debug, trace)",
+                if debug_override { "debug".to_string() } else { FALLBACK_LEVEL.to_string().to_lowercase() }
+            )),
+        ),
+    }
+}
+
+pub fn init(log_level: &str, log_file: &str, debug_override: bool) -> Result<(), log::SetLoggerError> {
+    let (level, level_warning) = resolve_level(log_level, debug_override);
 
     // Console: render markup to colour on an interactive terminal; if stdout is
     // redirected (piped, captured by a service manager), strip it to plain text.
@@ -116,10 +129,14 @@ pub fn init(log_level: &str, log_file: &str, debug_override: bool) {
         Err(e) => (dispatch, Some(format!("cannot open log file '{}': {}", log_file, e))),
     };
 
-    dispatch.apply().expect("logger init");
+    dispatch.apply()?;
+    if let Some(msg) = level_warning {
+        log::warn!("{msg}");
+    }
     if let Some(msg) = file_err {
         log::warn!("{msg}; continuing with console-only logging");
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -134,6 +151,28 @@ mod tests {
         assert_eq!(LevelFilter::from_str("warn").unwrap(), LevelFilter::Warn);
         assert_eq!(LevelFilter::from_str("error").unwrap(), LevelFilter::Error);
         assert_eq!(LevelFilter::from_str("off").unwrap(), LevelFilter::Off);
+    }
+
+    #[test]
+    fn invalid_level_yields_a_warning_naming_value_and_fallback() {
+        let (level, warning) = resolve_level("verbose", false);
+        assert_eq!(level, LevelFilter::Info);
+        let w = warning.expect("warning");
+        assert!(w.contains("'verbose'") && w.contains("'info'"), "{w}");
+    }
+
+    #[test]
+    fn invalid_level_still_warns_with_debug_override() {
+        let (level, warning) = resolve_level("bogus", true);
+        assert_eq!(level, LevelFilter::Debug);
+        let w = warning.expect("warning");
+        assert!(w.contains("'bogus'") && w.contains("'debug'"), "{w}");
+    }
+
+    #[test]
+    fn second_init_returns_err() {
+        let _ = init("info", "/dev/null", false);
+        assert!(init("info", "/dev/null", false).is_err());
     }
 
     #[test]

@@ -1,5 +1,6 @@
 extern crate ctrlc;
 use clap::builder::styling::{AnsiColor, Styles};
+use anyhow::Context;
 use clap::Parser;
 use log::info;
 use std::path::PathBuf;
@@ -55,7 +56,7 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
     if let Some(Commands::Pair { passkey }) = &args.command {
-        logging::init("info", "/dev/null", args.debug);
+        logging::init("info", "/dev/null", args.debug)?;
         return cli::pair::run(&args.config, *passkey).await;
     }
 
@@ -63,7 +64,7 @@ async fn main() -> anyhow::Result<()> {
         Ok(c) => c,
         Err(e) => { eprintln!("aa-proxy-obd: config load failed: {e}"); std::process::exit(1); }
     };
-    logging::init(&cfg.daemon.log_level, &cfg.daemon.log_file, args.debug);
+    logging::init(&cfg.daemon.log_level, &cfg.daemon.log_file, args.debug)?;
     for w in &config_warnings {
         log::warn!("{w}");
     }
@@ -119,7 +120,7 @@ async fn main() -> anyhow::Result<()> {
     {
         let s = shutdown.clone();
         ctrlc::set_handler(move || s.trigger())
-            .expect("Ctrl-C handler");
+            .context("install Ctrl-C handler")?;
     }
 
     scheduler::run(adapter, cfg.daemon, publisher, shutdown).await
