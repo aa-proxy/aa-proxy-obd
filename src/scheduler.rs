@@ -155,6 +155,7 @@ pub async fn run(
                     // is down (circuit breaker open) should keep running and let
                     // the breaker back off, not be killed by the watchdog.
                     let produced_data = !metrics.is_empty();
+                    info!("collected {} metrics", metrics.len());
                     let _ = publisher.publish(&metrics).await;
                     if produced_data {
                         no_publish_cycles = 0;
