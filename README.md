@@ -198,6 +198,7 @@ Only `kind` and `frames` are required; the values below are the defaults.
 | `multiplier` | f32 | no (default 1.0) | `raw × multiplier + offset` |
 | `offset` | f32 | no (default 0.0) | as above |
 | `signed` | bool | no | byte extraction only; sign-extend before scaling |
+| `enabled` | bool | no (default true) | `false` keeps the definition in the file (JSON has no comments) but the value is neither read nor sent; the definition is still validated, so switching it on later cannot fail at load |
 
 When both `bit_offset`/`bit_length` and `byte_index`/`length` are present, the bit extraction wins.
 

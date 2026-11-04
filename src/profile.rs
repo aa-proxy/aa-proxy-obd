@@ -30,9 +30,14 @@ pub struct FieldSpec {
     pub offset: f32,
     #[serde(default)]
     pub signed: Option<bool>,
+    /// A disabled field stays in the file (and is still validated) but is not
+    /// extracted or reported.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
 }
 
 fn one_f32() -> f32 { 1.0 }
+fn default_true() -> bool { true }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct UdsPidSource {

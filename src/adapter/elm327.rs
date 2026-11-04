@@ -461,7 +461,7 @@ where
         for frame in &spec.frames {
             if let Some(payloads) = routed.get(&frame.can_id) {
                 if let Some(latest) = payloads.last() {
-                    for fld in &frame.fields {
+                    for fld in frame.fields.iter().filter(|f| f.enabled) {
                         if let Some(v) = extract_value_broadcast(latest, fld) {
                             metrics.insert(fld.name.clone(), v);
                         }
@@ -496,7 +496,7 @@ where
                 match result {
                     Ok(payload) if payload.is_empty() => continue,
                     Ok(payload) => {
-                        for f in &uds.fields {
+                        for f in uds.fields.iter().filter(|f| f.enabled) {
                             if let Some(v) = extract_value(&payload, f) {
                                 debug!("{}: {}", f.name, v);
                                 metrics.insert(f.name.clone(), v);
@@ -785,7 +785,7 @@ mod tests {
         let f = FieldSpec {
             name: "soc".into(), byte_index: Some(5), length: Some(1),
             bit_offset: None, bit_length: None,
-            multiplier: 0.5, offset: 0.0, signed: None,
+            multiplier: 0.5, offset: 0.0, signed: None, enabled: true,
         };
         assert_eq!(extract_value(&payload, &f), Some(67.0));
     }
@@ -797,7 +797,7 @@ mod tests {
         let f = FieldSpec {
             name: "delta".into(), byte_index: Some(0), length: Some(1),
             bit_offset: None, bit_length: None,
-            multiplier: 1.0, offset: 0.0, signed: Some(true),
+            multiplier: 1.0, offset: 0.0, signed: Some(true), enabled: true,
         };
         assert_eq!(extract_value(&payload, &f), Some(-10.0));
     }
@@ -808,7 +808,7 @@ mod tests {
         let f = FieldSpec {
             name: "x".into(), byte_index: Some(-3), length: Some(3),
             bit_offset: None, bit_length: None,
-            multiplier: 1.0, offset: 0.0, signed: None,
+            multiplier: 1.0, offset: 0.0, signed: None, enabled: true,
         };
         assert_eq!(extract_value(&payload, &f), Some(4386.0));
     }
@@ -819,7 +819,7 @@ mod tests {
         let f = FieldSpec {
             name: "x".into(), byte_index: Some(10), length: Some(1),
             bit_offset: None, bit_length: None,
-            multiplier: 1.0, offset: 0.0, signed: None,
+            multiplier: 1.0, offset: 0.0, signed: None, enabled: true,
         };
         assert_eq!(extract_value(&payload, &f), None);
     }
@@ -908,7 +908,7 @@ mod tests {
         let f = FieldSpec {
             name: "x".into(), byte_index: None, length: None,
             bit_offset: Some(0), bit_length: Some(1),
-            multiplier: 1.0, offset: 0.0, signed: None,
+            multiplier: 1.0, offset: 0.0, signed: None, enabled: true,
         };
         assert_eq!(extract_value(&p, &f), Some(1.0));
     }
@@ -959,7 +959,7 @@ mod tests {
         let mut f = FieldSpec {
             name: "x".into(), byte_index: Some(i32::MAX - 1), length: Some(1),
             bit_offset: None, bit_length: None,
-            multiplier: 1.0, offset: 0.0, signed: None,
+            multiplier: 1.0, offset: 0.0, signed: None, enabled: true,
         };
         assert_eq!(extract_value(&p, &f), None);
         assert_eq!(extract_value_broadcast(&p, &f), None);

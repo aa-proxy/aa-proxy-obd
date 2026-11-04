@@ -678,12 +678,35 @@ async fn poll_sources_reports_link_closed_during_multiframe() {
     }
 }
 
+/// A field with `enabled: false` is not extracted; the other fields of the
+/// same source still are.
+#[tokio::test(start_paused = true)]
+async fn poll_sources_skips_disabled_fields() {
+    let v = kona_220105();
+    let mut p = profile(&v.profile_file);
+    p.sources.retain(|s| matches!(s, Source::UdsPid(u) if u.pid == v.pid));
+    for s in &mut p.sources {
+        if let Source::UdsPid(u) = s {
+            for f in &mut u.fields {
+                f.enabled = f.name != "battery_state_of_health";
+            }
+        }
+    }
+    let (host, _log) = emu::spawn(EmuConfig::default(), vec![ecu_for(&v)]);
+    let mut s = Elm327Session::new(host);
+    s.run_init(DEFAULT_INIT).await.unwrap();
+    let m = super::elm327::poll_sources(&mut s, &p).await.unwrap();
+    assert!(!m.contains_key("battery_state_of_health"), "{m:?}");
+    let want = v.expected.get("battery_level_percentage").copied().unwrap();
+    assert!(close(m["battery_level_percentage"], want), "{m:?}");
+}
+
 // ---- Reply parsing ----------------------------------------------------------------
 
 fn field(name: &str, byte_index: i32, length: usize) -> crate::profile::FieldSpec {
     crate::profile::FieldSpec {
         name: name.into(), byte_index: Some(byte_index), length: Some(length),
-        bit_offset: None, bit_length: None, multiplier: 1.0, offset: 0.0, signed: None,
+        bit_offset: None, bit_length: None, multiplier: 1.0, offset: 0.0, signed: None, enabled: true,
     }
 }
 
