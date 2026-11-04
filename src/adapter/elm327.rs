@@ -22,6 +22,14 @@ const EOM_PROMPT: u8 = b'>';
 const SEND_CMD_TIMEOUT: Duration = Duration::from_millis(5000);
 const RESYNC_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// ATSH, ATCRA and ATFCSH take 3, 6 or 8 hex digits.
+fn check_can_id(cmd: &str, id: &str) -> Result<()> {
+    if !crate::profile::is_valid_can_id(id) {
+        return Err(anyhow!("{cmd} id '{id}' must be 3, 6 or 8 hex digits"));
+    }
+    Ok(())
+}
+
 /// One session owns one buffered reader for its whole life: bytes that arrive
 /// after a '>' prompt stay in the buffer for the next read instead of being
 /// dropped with a per-call reader. Writes pass through to the inner stream.
@@ -86,9 +94,6 @@ where
                 trace!("Response ASCII: {ascii}");
                 if ascii.contains("NO DATA") {
                     return Err(anyhow::Error::new(IoError::other("no data")));
-                }
-                if ascii.contains("7F 22 12") {
-                    return Err(anyhow::Error::new(IoError::other("Service Not Supported")));
                 }
                 Ok(buf)
             }
@@ -201,29 +206,52 @@ where
 
     /// Send a uds_pid source and return the single-frame response payload.
     pub async fn poll_uds_pid(&mut self, uds: &UdsPidSource) -> Result<Vec<u8>> {
-        self.send_cmd(&format!("ATSH{}", uds.ecu_tx)).await?;
-        self.send_cmd(&format!("ATCRA{}", uds.ecu_rx)).await?;
-        self.send_cmd(&format!("ATFCSH{}", uds.ecu_tx)).await?;
+        check_can_id("ATSH", &uds.ecu_tx)?;
+        check_can_id("ATCRA", &uds.ecu_rx)?;
+        self.send_header_cmd(&format!("ATSH{}", uds.ecu_tx)).await?;
+        self.send_header_cmd(&format!("ATCRA{}", uds.ecu_rx)).await?;
+        self.send_header_cmd(&format!("ATFCSH{}", uds.ecu_tx)).await?;
         self.send_cmd("ATFCSD300000").await?;
         self.send_cmd("ATFCSM1").await?;
+        // Single-frame parsing expects replies without the CAN-ID prefix.
+        self.send_cmd("ATH0").await?;
         if let Some(pre) = &uds.pre_request {
             // Pre-request errors are intentionally ignored — some ECUs don't ACK.
             let _ = self.send_cmd(pre).await;
         }
         let raw = self.send_cmd(&uds.pid).await?;
-        Ok(get_payload(&String::from_utf8_lossy(&raw)))
+        let payload = get_payload(&String::from_utf8_lossy(&raw));
+        let service = uds.pid.get(..2).and_then(|s| u8::from_str_radix(s, 16).ok());
+        if let (Some(&0x7F), Some(&svc)) = (payload.first(), payload.get(1)) {
+            if service.is_none() || service == Some(svc) {
+                let nrc = payload.get(2).map_or_else(|| "none".to_string(), |n| format!("{n:02X}"));
+                return Err(anyhow::Error::new(std::io::Error::other(format!(
+                    "ECU rejected request {}: negative response code {nrc}",
+                    uds.pid
+                ))));
+            }
+        }
+        Ok(payload)
+    }
+
+    /// Send a header command; a "?" reply means the adapter rejected it.
+    async fn send_header_cmd(&mut self, cmd: &str) -> Result<()> {
+        let reply = self.send_cmd(cmd).await?;
+        if String::from_utf8_lossy(&reply).contains('?') {
+            return Err(anyhow!("adapter rejected {cmd}"));
+        }
+        Ok(())
     }
 
     /// Poll a uds_pid source with ISO-TP flow-control reassembly, for responses
     /// that span multiple frames. Used when the source sets multiframe = true.
     pub async fn poll_uds_pid_multiframe(&mut self, uds: &UdsPidSource) -> Result<Vec<u8>> {
-        let sh   = u32::from_str_radix(&uds.ecu_tx, 16).context("ecu_tx not hex")?;
-        let cra  = u32::from_str_radix(&uds.ecu_rx, 16).context("ecu_rx not hex")?;
-        let fcsh = sh;
+        check_can_id("ATSH", &uds.ecu_tx)?;
+        check_can_id("ATCRA", &uds.ecu_rx)?;
 
-        self.send_cmd(&format!("ATSH{:x}", sh)).await?;
-        self.send_cmd(&format!("ATCRA{:x}", cra)).await?;
-        self.send_cmd(&format!("ATFCSH{:x}", fcsh)).await?;
+        self.send_header_cmd(&format!("ATSH{}", uds.ecu_tx)).await?;
+        self.send_header_cmd(&format!("ATCRA{}", uds.ecu_rx)).await?;
+        self.send_header_cmd(&format!("ATFCSH{}", uds.ecu_tx)).await?;
         self.send_cmd("ATFCSD300000").await?;
         self.send_cmd("ATFCSM1").await?;
         self.send_cmd("ATH0").await?;
@@ -399,8 +427,32 @@ fn strip_echo(buf: &mut Vec<u8>, cmd: &str) {
     }
 }
 
+/// Hex bytes of one reply line. A line with spaces is read token by token and
+/// only 2-digit tokens count, so a 3-digit CAN-ID cannot shift the pairing; a
+/// line without spaces (ATS0) is read as consecutive hex pairs.
+// as_chunks needs Rust 1.88; production code targets 1.80; unknown_lints keeps older clippy quiet
+#[allow(clippy::chunks_exact_to_as_chunks, unknown_lints)]
+fn hex_bytes(data: &str) -> Vec<u8> {
+    if data.contains(' ') {
+        data.split_whitespace()
+            .filter(|t| t.len() == 2)
+            .filter_map(|t| u8::from_str_radix(t, 16).ok())
+            .collect()
+    } else {
+        data.as_bytes().chunks_exact(2)
+            .filter_map(|p| std::str::from_utf8(p).ok())
+            .filter_map(|p| u8::from_str_radix(p, 16).ok())
+            .collect()
+    }
+}
+
 /// Strip ELM327 framing from a raw response string and return the UDS payload
-/// bytes (header + data).
+/// bytes (header + data). Lines with spaces are read token by token and only
+/// 2-digit tokens count as bytes, so a 3-digit CAN-ID printed with headers on
+/// (e.g. "7EC 06 62 20 06 02 15 04") cannot shift the character pairing; the
+/// PCI byte after the CAN-ID is still part of the payload, so byte indices are
+/// only correct when headers are off (poll_uds_pid sends ATH0). Lines without
+/// spaces (ATS0, e.g. "0:620105FFFB74") are read as consecutive hex pairs.
 pub fn get_payload(response: &str) -> Vec<u8> {
     let frames: Vec<&str> = response.split(['\r', '\n'])
         .map(|s| s.trim())
@@ -412,27 +464,15 @@ pub fn get_payload(response: &str) -> Vec<u8> {
     let mut is_first = true;
 
     for frame in frames {
-        let cleaned = frame.replace(' ', "");
-        if is_first && cleaned.len() <= 3 {
+        let compact = frame.replace(' ', "");
+        if is_first && compact.len() <= 3 {
             is_first = false;
             continue;
         }
         is_first = false;
 
-        let data_str = if cleaned.contains(':') {
-            cleaned.split(':').nth(1).unwrap_or("").to_string()
-        } else {
-            cleaned
-        };
-
-        let mut bytes = Vec::new();
-        let mut chars = data_str.chars();
-        while let (Some(c1), Some(c2)) = (chars.next(), chars.next()) {
-            if let Ok(b) = u8::from_str_radix(&format!("{c1}{c2}"), 16) {
-                bytes.push(b);
-            }
-        }
-        if !bytes.is_empty() { payload.extend(bytes); }
+        let data = frame.split_once(':').map_or(frame, |(_, rest)| rest.trim());
+        payload.extend(hex_bytes(data));
     }
     payload
 }
@@ -692,16 +732,25 @@ mod tests {
 
     #[test]
     fn get_payload_handles_single_frame_with_colon() {
-        let raw = "0:6201050011 22\r\n>";
+        let raw = "0: 62 01 05 00 11 22\r\n>";
         let p = get_payload(raw);
         assert_eq!(p, vec![0x62, 0x01, 0x05, 0x00, 0x11, 0x22]);
     }
 
     #[test]
     fn get_payload_strips_length_header_first_frame() {
-        let raw = "014\r0:62010511 22 33\r\n>";
+        let raw = "014\r0:620105112233\r\n>";
         let p = get_payload(raw);
         assert_eq!(p, vec![0x62, 0x01, 0x05, 0x11, 0x22, 0x33]);
+    }
+
+    #[test]
+    fn get_payload_ignores_odd_length_tokens() {
+        // Headers on: the 3-digit CAN-ID is dropped instead of shifting the pairs; the PCI byte (06) stays in the payload.
+        let p = get_payload("7EC 06 62 20 06 02 15 04 \r\r>");
+        assert!(p.ends_with(&[0x02, 0x15, 0x04]), "{p:02X?}");
+        let p = get_payload("0: 62 01 05 00 11 22\r\r>");
+        assert_eq!(p, vec![0x62, 0x01, 0x05, 0x00, 0x11, 0x22]);
     }
 
     #[test]

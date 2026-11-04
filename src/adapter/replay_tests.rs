@@ -500,6 +500,32 @@ async fn resync_without_prompt_fails_instead_of_shifting() {
     assert!(!log.iter().any(|(c, _)| c == "ATI"), "ATI was written\nlog: {log:?}");
 }
 
+// ---- Headers left on (Renault Zoe log, cycle 14:14:43) ----------------------
+
+/// With headers on, single-frame replies print as "7EC 06 62 20 06 02 15 04".
+/// The per-request setup turns headers off, so the values still decode.
+#[tokio::test(start_paused = true)]
+async fn zoe_headers_left_on_still_decode() {
+    let ecus = vec![
+        Ecu::new(0x7E4, 0x7EC)
+            .respond_payload("10C0", "50 C0")
+            .respond_payload("222002", "62 20 02 0A 26")
+            .respond_payload("222006", "62 20 06 02 15 04"),
+    ];
+    let p = profile("zoe");
+    let init = profile_init(&p);
+    let (host, log) = emu::spawn(EmuConfig::default(), ecus);
+    let mut s = Elm327Session::new(host);
+    s.run_init(&init).await.unwrap();
+    s.send_cmd("ATH1").await.unwrap();
+    let odo = poll_source(&mut s, uds_source(&p, "222006")).await;
+    let soc = poll_source(&mut s, uds_source(&p, "222002")).await;
+    let mut bad = compare("222006", &odo, &[("odometer_km".to_string(), 136452.0)].into());
+    bad.extend(compare("222002", &soc, &[("battery_level_percentage".to_string(), 51.96)].into()));
+    let log = log.lock().unwrap().clone();
+    assert!(bad.is_empty(), "{}\nlog: {log:?}", bad.join("\n"));
+}
+
 // ---- Broadcast scan followed by polling ---------------------------------------
 
 /// The ELM answers the character that stops ATMA after a delay (it completes
@@ -586,6 +612,57 @@ async fn broadcast_self_stop_skips_stop_cr() {
 
 // ---- Zoe SOC (shipped 3-byte form vs plain 2-byte form) ---
 
+// ---- Reply parsing ----------------------------------------------------------------
+
+fn field(name: &str, byte_index: i32, length: usize) -> crate::profile::FieldSpec {
+    crate::profile::FieldSpec {
+        name: name.into(), byte_index: Some(byte_index), length: Some(length),
+        bit_offset: None, bit_length: None, multiplier: 1.0, offset: 0.0, signed: None,
+    }
+}
+
+fn source_with(base: &UdsPidSource, multiframe: bool, fields: Vec<crate::profile::FieldSpec>) -> UdsPidSource {
+    UdsPidSource { multiframe, fields, ..base.clone() }
+}
+
+/// Data bytes 7F 22 12 inside a positive reply are data, not a rejection.
+#[tokio::test(start_paused = true)]
+async fn positive_reply_containing_7f_22_12_decodes() {
+    let p = profile("zoe");
+    let uds = source_with(uds_source(&p, "222006"), false, vec![field("a", 0, 1), field("b", 1, 1), field("c", 2, 1)]);
+    let ecu = Ecu::new(0x7E4, 0x7EC).respond_payload("222006", "62 20 06 7F 22 12");
+    let r = replay_with(ecu, &uds).await;
+    let want: HashMap<String, f32> = [("a".to_string(), 127.0), ("b".to_string(), 34.0), ("c".to_string(), 18.0)].into();
+    let bad = compare("7f2212", &r, &want);
+    assert!(bad.is_empty(), "{}", bad.join("\n"));
+}
+
+/// A single-frame negative response is an error that carries the response code.
+#[tokio::test(start_paused = true)]
+async fn single_frame_negative_response_reports_the_code() {
+    let p = profile("zoe");
+    let uds = source_with(uds_source(&p, "222006"), false, vec![field("a", 0, 1)]);
+    let ecu = Ecu::new(0x7E4, 0x7EC).respond_payload("222006", "7F 22 31");
+    let r = replay_with(ecu, &uds).await;
+    assert!(r.as_ref().is_err_and(|e| e.contains("rejected") && e.contains("31")), "{r:?}");
+}
+
+/// Profile CAN-IDs are sent as written: 8 digits, with leading zeros kept.
+#[tokio::test(start_paused = true)]
+async fn multiframe_eight_digit_ids_are_sent_as_written() {
+    let p = profile("zoe");
+    for (tx, rx) in [("18DADAF1", "18DAF1DA"), ("0CDA10F1", "0CDAF110")] {
+        let uds = UdsPidSource {
+            ecu_tx: tx.into(), ecu_rx: rx.into(),
+            ..source_with(uds_source(&p, "2174"), true, vec![field("a", 0, 1)])
+        };
+        let ecu = Ecu::new(hexid(tx), hexid(rx)).respond_payload("2174", "61 74 05 06 07 08 09 0A 0B 0C");
+        let r = replay_with(ecu, &uds).await;
+        let bad = compare(tx, &r, &[("a".to_string(), 6.0)].into());
+        assert!(bad.is_empty(), "{}", bad.join("\n"));
+    }
+}
+
 /// A peer that answers every AT command with OK and, once it gets the request,
 /// prints a non-empty line every 400 ms and never a prompt. The poll gives up at
 /// its overall deadline instead of reading until the line cap.
@@ -618,4 +695,28 @@ async fn multiframe_reply_without_prompt_ends_at_the_deadline() {
     let _ = s.poll_uds_pid_multiframe(&uds).await;
     let took = start.elapsed();
     assert!(took < Duration::from_secs(30), "poll took {took:?}");
+}
+
+/// The single-frame path checks the header commands like the multiframe one.
+#[tokio::test(start_paused = true)]
+async fn single_frame_header_command_rejected_by_adapter_is_an_error() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let p = profile("zoe");
+    let uds = uds_source(&p, "222006").clone();
+    let (host, mut peer) = tokio::io::duplex(1024);
+    tokio::spawn(async move {
+        let mut byte = [0u8; 1];
+        loop {
+            if peer.read(&mut byte).await.unwrap_or(0) == 0 { return; }
+            if byte[0] == b'\r' && peer.write_all(b"?\r\r>").await.is_err() { return; }
+        }
+    });
+    let mut s = Elm327Session::new(host);
+    let r = s.poll_uds_pid(&uds).await.map_err(|e| format!("{e:#}"));
+    assert!(r.as_ref().is_err_and(|e| e.contains("ATSH")), "{r:?}");
+    let bad = UdsPidSource { ecu_tx: "CDA10F1".into(), ..uds };
+    let (host, _log) = emu::spawn(EmuConfig::default(), vec![]);
+    let mut s = Elm327Session::new(host);
+    let r = s.poll_uds_pid(&bad).await.map_err(|e| format!("{e:#}"));
+    assert!(r.as_ref().is_err_and(|e| e.contains("ATSH")), "{r:?}");
 }
