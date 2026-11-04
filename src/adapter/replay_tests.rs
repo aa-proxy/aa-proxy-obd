@@ -311,6 +311,14 @@ async fn zoe_cycles_with_post_reply_wait() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn zoe_cycles_with_immediate_prompt() {
+    // The adapter prints the prompt right after the last frame, with no
+    // post-reply wait; any further typed line would run as a new request.
+    let (results, log) = zoe_cycle(EmuConfig::default(), ZOE_CAPTURE_TIRES).await;
+    check_zoe(&results, &log, ZOE_CAPTURE_TIRES);
+}
+
+#[tokio::test(start_paused = true)]
 async fn multiframe_negative_response_is_an_error() {
     let ecus = vec![
         Ecu::new(0x745, 0x765).respond_payload("2174", "7F 21 12"),

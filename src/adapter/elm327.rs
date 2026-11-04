@@ -108,7 +108,6 @@ where
             .context("multiframe PID write")?;
 
         let mut lines: Vec<Vec<u8>> = Vec::new();
-        let mut fc_sent = false;
 
         for _ in 0..25 {
             let line = match read_line_raw(&mut self.stream, 500).await {
@@ -125,15 +124,11 @@ where
                 let _ = self.send_cmd("ATH0").await;
                 return Err(anyhow!("UDS error response: {trimmed}"));
             }
+            // The ELM327 sends the ISO-TP flow-control frame itself
+            // (ATFCSM1 with ATFCSH/ATFCSD above). Anything written to the
+            // serial link here would be read as typed input and interrupt
+            // the request.
             lines.push(line);
-
-            // After the first ECU frame, send a flow-control frame so the ECU
-            // streams the remaining consecutive frames.
-            if !fc_sent && lines.len() == 1 {
-                self.stream.write_all(b"300200\r").await
-                    .context("FC frame write")?;
-                fc_sent = true;
-            }
         }
 
         // Restore the headers-OFF baseline that single-frame get_payload
