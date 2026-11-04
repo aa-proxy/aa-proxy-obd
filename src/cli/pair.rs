@@ -8,7 +8,7 @@ use crate::adapter::pairing::register_passkey_agent;
 use crate::config::{Config, DeviceType};
 use anyhow::{anyhow, Context, Result};
 use bluer::{Address, Session};
-use log::info;
+use log::{info, warn};
 use std::io::{self, Write};
 use std::path::Path;
 use std::str::FromStr;
@@ -59,23 +59,30 @@ pub async fn run(config_path: &Path, passkey_arg: Option<u32>) -> Result<()> {
         }).await;
         match found {
             Ok(Ok(())) => info!("device discovered"),
-            _ => return Err(anyhow!("discovery timed out; ensure the device is powered and advertising")),
+            Ok(Err(e)) => return Err(e.context("discovery failed")),
+            Err(_) => return Err(anyhow!(
+                "discovery timed out after 15s; ensure the device is powered and advertising"
+            )),
         }
     }
 
     let device = adapter.device(mac).context("device handle")?;
-    if device.is_paired().await.unwrap_or(false) {
+    if device.is_paired().await.context("query paired state")? {
         println!("Device {mac} is already paired.");
-    } else {
-        info!("attempting pairing");
-        device.pair().await.context("pair failed")?;
-        println!("Pairing succeeded.");
+        info!("existing bond kept; the entered passkey was not used and will not be saved");
+        return Ok(());
     }
+    info!("attempting pairing");
+    device.pair().await.context("pair failed")?;
+    println!("Pairing succeeded.");
 
     print!("Save passkey to {} under [device].{}? [y/N]: ", config_path.display(), key_name);
     io::stdout().flush().ok();
     let mut answer = String::new();
-    io::stdin().read_line(&mut answer).ok();
+    if let Err(e) = io::stdin().read_line(&mut answer) {
+        warn!("passkey not saved: could not read the confirmation: {e}");
+        return Ok(());
+    }
     if matches!(answer.trim(), "y" | "Y" | "yes") {
         write_passkey_to_config(config_path, key_name, passkey)?;
         println!("Saved.");
