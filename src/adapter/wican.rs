@@ -197,4 +197,8 @@ impl Adapter for WicanAdapter {
         self.device = None;
         self._agent_handle = None;
     }
+
+    fn connect_bound(&self) -> Duration {
+        super::wican_connect_bound(self.max_retries, self.timeout_secs)
+    }
 }

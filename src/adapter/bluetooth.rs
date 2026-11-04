@@ -60,7 +60,7 @@ impl Adapter for BluetoothElm327Adapter {
             self.bluer_session = Some(session);
             self._agent_handle = Some(handle);
         }
-        let connect_timeout = Duration::from_secs(self.timeout_secs as u64);
+        let connect_timeout = Duration::from_secs(u64::from(self.timeout_secs.max(1)));
         let mut connected: Option<Stream> = None;
         for attempt in 1..=self.max_retries {
             info!("Connecting to {} ch {} (attempt {}/{})",
@@ -138,6 +138,10 @@ impl Adapter for BluetoothElm327Adapter {
 
     async fn disconnect(&mut self) {
         self.session.take();
+    }
+
+    fn connect_bound(&self) -> Duration {
+        super::retry_connect_bound(self.max_retries, self.timeout_secs)
     }
 }
 

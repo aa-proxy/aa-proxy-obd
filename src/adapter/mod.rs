@@ -79,11 +79,41 @@ fn is_host_gone(_: &std::io::Error) -> bool {
     false
 }
 
+/// Floor for the per-call connect bound.
+pub const MIN_CONNECT_BOUND: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Connect bound for a retrying radio link: each attempt may use the attempt
+/// timeout, the 2 s pause between attempts, a 4 s link probe, up to 6 s of
+/// local-address waiting and the init exchange, budgeted as `timeout_secs` plus
+/// 20 s; 60 s covers setup around the attempts. Never below `MIN_CONNECT_BOUND`.
+pub fn retry_connect_bound(max_retries: u8, timeout_secs: u8) -> std::time::Duration {
+    let secs = u64::from(max_retries.max(1)) * (u64::from(timeout_secs.max(1)) + 20) + 60;
+    std::time::Duration::from_secs(secs).max(MIN_CONNECT_BOUND)
+}
+
+/// Connect bound for the WiCAN link: each attempt may use the attempt timeout,
+/// 30 s of GATT setup and the 10 s pause between attempts; 60 s covers setup
+/// around the attempts. Never below `MIN_CONNECT_BOUND`.
+pub fn wican_connect_bound(max_retries: u8, timeout_secs: u8) -> std::time::Duration {
+    let secs = u64::from(max_retries.max(1)) * (u64::from(timeout_secs.max(1)) + 30) + 60;
+    std::time::Duration::from_secs(secs).max(MIN_CONNECT_BOUND)
+}
+
+/// Futures returned by `connect` and `poll` must not be dropped while a
+/// command is in progress: a half-sent command or an unread reply leaves the
+/// link out of step. After a dropped future, call `disconnect` before reusing
+/// the adapter.
 #[async_trait::async_trait]
 pub trait Adapter: Send {
     async fn connect(&mut self) -> Result<(), AdapterError>;
     async fn poll(&mut self) -> Result<Metrics, AdapterError>;
     async fn disconnect(&mut self) {}
+
+    /// Longest a single `connect` call may run before the scheduler abandons
+    /// it and disconnects.
+    fn connect_bound(&self) -> std::time::Duration {
+        MIN_CONNECT_BOUND
+    }
 }
 
 #[cfg(test)]
@@ -126,6 +156,23 @@ mod tests {
         assert_eq!(kind_of(e), "fatal");
         let e = anyhow::Error::new(IoError::new(ErrorKind::AddrNotAvailable, "x")).context("c");
         assert_eq!(kind_of(e), "sleeping");
+    }
+
+    #[test]
+    fn connect_bound_follows_retry_settings() {
+        use std::time::Duration;
+        assert_eq!(retry_connect_bound(5, 10), Duration::from_secs(300));
+        assert_eq!(retry_connect_bound(10, 30), Duration::from_secs(560));
+        assert_eq!(retry_connect_bound(0, 0), Duration::from_secs(300));
+    }
+
+    #[test]
+    fn wican_connect_bound_covers_the_pause_between_attempts() {
+        use std::time::Duration;
+        assert_eq!(wican_connect_bound(0, 0), Duration::from_secs(300));
+        assert_eq!(wican_connect_bound(5, 10), Duration::from_secs(300));
+        assert_eq!(wican_connect_bound(10, 30), Duration::from_secs(660));
+        assert_eq!(wican_connect_bound(3, 255), Duration::from_secs(915));
     }
 
     #[test]

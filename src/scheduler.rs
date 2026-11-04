@@ -57,6 +57,10 @@ pub fn watchdog_should_fire(count: u32, limit: u32) -> bool {
     limit > 0 && count >= limit
 }
 
+/// Upper bound for one `poll` call. A poll sends a handful of short ELM327
+/// commands, so anything near this long means the link is stuck.
+const POLL_TIMEOUT: Duration = Duration::from_secs(120);
+
 pub async fn run(
     mut adapter: Box<dyn Adapter>,
     daemon: DaemonSection,
@@ -71,6 +75,8 @@ pub async fn run(
     let mut poll_deadline = Instant::now();
     let mut no_publish_cycles: u32 = 0;
     let limit = daemon.cycle_failure_limit;
+    // Bound for one connect call, taken from the adapter's own retry settings.
+    let connect_bound = adapter.connect_bound();
 
     'connect: loop {
         if !shutdown.is_running() {
@@ -81,7 +87,15 @@ pub async fn run(
         let connect_res = tokio::select! {
             biased;
             _ = shutdown.wait() => { adapter.disconnect().await; break 'connect; }
-            r = adapter.connect() => r,
+            r = tokio::time::timeout(connect_bound, adapter.connect()) => r,
+        };
+        let connect_res = match connect_res {
+            Ok(r) => r,
+            Err(_) => {
+                warn!("connect timed out after {:?}", connect_bound);
+                adapter.disconnect().await;
+                Err(AdapterError::FatalConn(anyhow::anyhow!("connect timed out")))
+            }
         };
         if let Err(e) = connect_res {
             info!("connect failed ({e}); retrying in {:?}", poll_interval);
@@ -110,7 +124,14 @@ pub async fn run(
             let poll_res = tokio::select! {
                 biased;
                 _ = shutdown.wait() => { adapter.disconnect().await; break 'connect; }
-                r = adapter.poll() => r,
+                r = tokio::time::timeout(POLL_TIMEOUT, adapter.poll()) => r,
+            };
+            let poll_res = match poll_res {
+                Ok(r) => r,
+                Err(_) => {
+                    warn!("poll timed out after {:?}", POLL_TIMEOUT);
+                    Err(AdapterError::FatalConn(anyhow::anyhow!("poll timed out")))
+                }
             };
             match poll_res {
                 Ok(metrics) => {
@@ -264,6 +285,35 @@ mod tests {
         for w in connects.windows(2) {
             assert!(w[1] - w[0] >= Duration::from_secs(10), "{:?}", w[1] - w[0]);
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stuck_poll_is_cut_off_and_reconnected() {
+        let (events, sd, h) = harness(vec![Step::Never, Step::Never], false, 20);
+        tokio::time::sleep(Duration::from_secs(135)).await;
+        sd.trigger();
+        h.await.unwrap().unwrap();
+        let ev = events.lock().unwrap();
+        let t0 = ev[0].1;
+        assert_eq!(
+            ev.iter().map(|e| e.0).collect::<Vec<_>>(),
+            ["connect", "poll", "disconnect", "connect", "poll", "disconnect"]
+        );
+        assert_eq!(ev[2].1 - t0, POLL_TIMEOUT);
+        assert!(ev[3].1 - ev[2].1 >= Duration::from_secs(10));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stuck_connect_is_cut_off_at_the_bound() {
+        let (events, sd, h) = harness(vec![], true, 20);
+        tokio::time::sleep(Duration::from_secs(299)).await;
+        assert_eq!(names(&events), ["connect"]);
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert_eq!(names(&events), ["connect", "disconnect"]);
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        assert_eq!(names(&events), ["connect", "disconnect", "connect"]);
+        sd.trigger();
+        h.await.unwrap().unwrap();
     }
 
     #[tokio::test(start_paused = true)]
