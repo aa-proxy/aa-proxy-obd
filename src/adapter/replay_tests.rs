@@ -14,7 +14,7 @@
 
 use super::elm327::{extract_value, Elm327Session, DEFAULT_INIT};
 use super::elm327_emu::{self as emu, EmuConfig, Ecu};
-use super::Metrics;
+use super::{AdapterError, Metrics};
 use crate::profile::{Source, UdsPidSource, VehicleProfile};
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -611,6 +611,72 @@ async fn broadcast_self_stop_skips_stop_cr() {
 }
 
 // ---- Zoe SOC (shipped 3-byte form vs plain 2-byte form) ---
+
+// ---- Link loss during a scan --------------------------------------------------
+
+/// The link ends while ATMA is streaming. The shared per-source loop must
+/// report a lost connection rather than an empty or partial result.
+#[tokio::test(start_paused = true)]
+async fn poll_sources_reports_link_closed_during_broadcast() {
+    let mut p = profile("zoe");
+    p.sources.retain(|s| matches!(s, Source::Broadcast(_)));
+    assert_eq!(p.sources.len(), 1);
+    let init = profile_init(&p);
+    let cfg = EmuConfig {
+        broadcast: vec![(0x1F6, vec![0x01; 8])],
+        monitor_close_after: Some(2),
+        ..Default::default()
+    };
+    let (host, _log) = emu::spawn(cfg, vec![]);
+    let mut s = Elm327Session::new(host);
+    s.run_init(&init).await.unwrap();
+    match super::elm327::poll_sources(&mut s, &p).await {
+        Err(AdapterError::FatalConn(e)) => {
+            let io = e.chain().find_map(|c| c.downcast_ref::<std::io::Error>()).map(std::io::Error::kind);
+            assert_eq!(io, Some(std::io::ErrorKind::UnexpectedEof), "{e:#}");
+        }
+        other => panic!("expected FatalConn, got {other:?}"),
+    }
+}
+
+/// The peer answers the setup commands, starts the multiframe reply and
+/// closes the link before finishing it.
+#[tokio::test(start_paused = true)]
+async fn poll_sources_reports_link_closed_during_multiframe() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut p = profile("zoe");
+    p.sources.retain(|s| matches!(s, Source::UdsPid(u) if u.multiframe));
+    if p.sources.is_empty() {
+        let mut src = uds_source(&profile("zoe"), "222002").clone();
+        src.multiframe = true;
+        p.sources.push(Source::UdsPid(src));
+    }
+    let (host, mut peer) = tokio::io::duplex(1024);
+    tokio::spawn(async move {
+        let mut pending = Vec::new();
+        let mut byte = [0u8; 1];
+        loop {
+            if peer.read(&mut byte).await.unwrap_or(0) == 0 { return; }
+            if byte[0] != b'\r' { pending.push(byte[0]); continue; }
+            let cmd = String::from_utf8_lossy(&pending).into_owned();
+            pending.clear();
+            if cmd.starts_with("AT") {
+                if peer.write_all(b"OK\r\r>").await.is_err() { return; }
+            } else {
+                let _ = peer.write_all(b"7EC 10 08 62 20 02 0A\r").await;
+                return;
+            }
+        }
+    });
+    let mut s = Elm327Session::new(host);
+    match super::elm327::poll_sources(&mut s, &p).await {
+        Err(AdapterError::FatalConn(e)) => {
+            let io = e.chain().find_map(|c| c.downcast_ref::<std::io::Error>()).map(std::io::Error::kind);
+            assert_eq!(io, Some(std::io::ErrorKind::UnexpectedEof), "{e:#}");
+        }
+        other => panic!("expected FatalConn, got {other:?}"),
+    }
+}
 
 // ---- Reply parsing ----------------------------------------------------------------
 

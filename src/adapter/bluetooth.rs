@@ -1,8 +1,8 @@
 // Bluetooth ELM327 adapter: an RFCOMM stream driven through Elm327Session.
 
 use super::{Adapter, AdapterError, Metrics};
-use crate::adapter::elm327::{extract_value, Elm327Session, DEFAULT_INIT};
-use crate::profile::{Source, VehicleProfile};
+use crate::adapter::elm327::{poll_sources, Elm327Session, DEFAULT_INIT};
+use crate::profile::VehicleProfile;
 use anyhow::anyhow;
 use async_trait::async_trait;
 use bluer::{rfcomm::{SocketAddr, Stream}, Address};
@@ -132,51 +132,7 @@ impl Adapter for BluetoothElm327Adapter {
         let session = self.session.as_mut()
             .ok_or_else(|| AdapterError::FatalConn(anyhow!("not connected")))?;
 
-        let mut metrics = Metrics::new();
-        for source in &self.profile.sources {
-            match source {
-                Source::UdsPid(uds) => {
-                    debug!("Polling PID {} (multiframe={})", uds.pid, uds.multiframe);
-                    let result = if uds.multiframe {
-                        session.poll_uds_pid_multiframe(uds).await
-                    } else {
-                        session.poll_uds_pid(uds).await
-                    };
-                    match result {
-                        Ok(payload) if payload.is_empty() => continue,
-                        Ok(payload) => {
-                            for f in &uds.fields {
-                                if let Some(v) = extract_value(&payload, f) {
-                                    info!("{}: {}", f.name, v);
-                                    metrics.insert(f.name.clone(), v);
-                                } else {
-                                    warn!("extract failed for field '{}'", f.name);
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            use std::io::ErrorKind;
-                            match e.downcast_ref::<std::io::Error>().map(|io| io.kind()) {
-                                Some(ErrorKind::AddrNotAvailable) => return Err(AdapterError::Sleeping),
-                                Some(ErrorKind::BrokenPipe)
-                                | Some(ErrorKind::TimedOut)
-                                | Some(ErrorKind::NotConnected) => {
-                                    return Err(AdapterError::FatalConn(e));
-                                }
-                                _ => warn!("PID {} failed: {e:#}", uds.pid),
-                            }
-                        }
-                    }
-                }
-                Source::Broadcast(bc) => {
-                    match session.monitor_broadcast(bc).await {
-                        Ok(m) => metrics.extend(m),
-                        Err(e) => warn!("broadcast source failed: {e:#}"),
-                    }
-                }
-            }
-        }
-        Ok(metrics)
+        poll_sources(session, &self.profile).await
     }
 }
 

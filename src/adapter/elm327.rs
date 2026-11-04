@@ -2,9 +2,10 @@
 // (T: AsyncRead + AsyncWrite + Unpin) so it can drive both Bluetooth RFCOMM
 // and USB serial transports.
 
-use crate::profile::{BroadcastSource, FieldSpec, UdsPidSource};
+use super::{classify, AdapterError, Metrics};
+use crate::profile::{BroadcastSource, FieldSpec, Source, UdsPidSource, VehicleProfile};
 use anyhow::{anyhow, Context, Result};
-use log::{debug, trace};
+use log::{debug, trace, warn};
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -318,9 +319,16 @@ where
                 Err(e) if e.kind() == ErrorKind::TimedOut => break,
                 Err(e) => {
                     let _ = self.send_cmd("ATH0").await;
-                    return Err(anyhow!("multiframe read: {e}"));
+                    return Err(anyhow::Error::new(e).context("multiframe read"));
                 }
             };
+            // read_line skips empty lines, so an empty result is end-of-file.
+            if line.is_empty() {
+                return Err(anyhow::Error::new(std::io::Error::new(
+                    ErrorKind::UnexpectedEof,
+                    "link closed",
+                )).context("multiframe read"));
+            }
             let trimmed = String::from_utf8_lossy(&line).trim().to_string();
             if trimmed == ">" {
                 saw_prompt = true;
@@ -369,7 +377,15 @@ where
         spec: &BroadcastSource,
     ) -> Result<HashMap<String, f32>> {
         for cmd in &spec.init {
-            let _ = self.send_cmd(cmd).await;
+            if let Err(e) = self.send_cmd(cmd).await {
+                warn!("broadcast init '{cmd}' failed: {e:#}");
+                let timed_out = e.chain()
+                    .filter_map(|c| c.downcast_ref::<std::io::Error>())
+                    .any(|io| io.kind() == ErrorKind::TimedOut);
+                if timed_out {
+                    return Err(e.context(format!("broadcast init '{cmd}'")));
+                }
+            }
         }
         // ATMA streams continuously; do not wait for a '>' prompt.
         self.resync().await?;
@@ -394,6 +410,12 @@ where
         while tokio::time::Instant::now() < deadline {
             match self.read_line(200).await {
                 Ok(b) => {
+                    if b.is_empty() {
+                        return Err(anyhow::Error::new(std::io::Error::new(
+                            ErrorKind::UnexpectedEof,
+                            "broadcast stream closed",
+                        )));
+                    }
                     consecutive_timeouts = 0;
                     let ascii = String::from_utf8_lossy(&b).into_owned();
                     if ascii.contains('>') {
@@ -416,7 +438,7 @@ where
                     consecutive_timeouts += 1;
                     if consecutive_timeouts >= idle_attempts { break; }
                 }
-                Err(e) => return Err(anyhow!("broadcast read: {e}")),
+                Err(e) => return Err(anyhow::Error::new(e).context("broadcast read")),
             }
         }
 
@@ -449,6 +471,56 @@ where
         }
         Ok(metrics)
     }
+}
+
+/// Poll every source of a profile once and merge the results. Errors go
+/// through `classify`: a lost link or a down CAN bus ends the cycle at once,
+/// any other failure is logged and the next source is tried.
+pub async fn poll_sources<T>(
+    session: &mut Elm327Session<T>,
+    profile: &VehicleProfile,
+) -> std::result::Result<Metrics, AdapterError>
+where
+    T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let mut metrics = Metrics::new();
+    for source in &profile.sources {
+        match source {
+            Source::UdsPid(uds) => {
+                debug!("Polling PID {} (multiframe={})", uds.pid, uds.multiframe);
+                let result = if uds.multiframe {
+                    session.poll_uds_pid_multiframe(uds).await
+                } else {
+                    session.poll_uds_pid(uds).await
+                };
+                match result {
+                    Ok(payload) if payload.is_empty() => continue,
+                    Ok(payload) => {
+                        for f in &uds.fields {
+                            if let Some(v) = extract_value(&payload, f) {
+                                debug!("{}: {}", f.name, v);
+                                metrics.insert(f.name.clone(), v);
+                            } else {
+                                warn!("extract failed for field '{}'", f.name);
+                            }
+                        }
+                    }
+                    Err(e) => match classify(e) {
+                        AdapterError::Transient(e) => warn!("PID {} failed: {e:#}", uds.pid),
+                        other => return Err(other),
+                    },
+                }
+            }
+            Source::Broadcast(bc) => match session.monitor_broadcast(bc).await {
+                Ok(m) => metrics.extend(m),
+                Err(e) => match classify(e) {
+                    AdapterError::Transient(e) => warn!("broadcast source failed: {e:#}"),
+                    other => return Err(other),
+                },
+            },
+        }
+    }
+    Ok(metrics)
 }
 
 /// Remove NULL bytes, which the ELM327 may insert into its output.
@@ -941,6 +1013,22 @@ mod tests {
 
 
     #[tokio::test(start_paused = true)]
+    async fn send_cmd_reports_eof_as_a_lost_link() {
+        use tokio::io::AsyncReadExt;
+        let (a, mut b) = tokio::io::duplex(256);
+        let mut session = Elm327Session::new(a);
+        tokio::spawn(async move {
+            let mut req = [0u8; 16];
+            let _ = b.read(&mut req).await.unwrap();
+            drop(b);
+        });
+        let e = session.send_cmd("ATZ").await.unwrap_err();
+        let kind = e.downcast_ref::<std::io::Error>().map(std::io::Error::kind);
+        assert_eq!(kind, Some(ErrorKind::UnexpectedEof), "{e:#}");
+        assert!(matches!(classify(e), AdapterError::FatalConn(_)));
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn send_cmd_reply_cut_off_before_the_prompt_is_eof() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let (a, mut b) = tokio::io::duplex(256);
@@ -954,6 +1042,16 @@ mod tests {
         let e = session.send_cmd("2201").await.unwrap_err();
         let kind = e.downcast_ref::<std::io::Error>().map(std::io::Error::kind);
         assert_eq!(kind, Some(ErrorKind::UnexpectedEof), "{e:#}");
+    }
+
+    #[tokio::test]
+    async fn send_cmd_no_data_reply_stays_transient() {
+        use tokio::io::AsyncWriteExt;
+        let (a, mut b) = tokio::io::duplex(256);
+        let mut session = Elm327Session::new(a);
+        b.write_all(b"NO DATA\r\r>").await.unwrap();
+        let e = session.send_cmd("2201").await.unwrap_err();
+        assert!(matches!(classify(e), AdapterError::Transient(_)));
     }
 
     #[tokio::test]
