@@ -125,5 +125,11 @@ async fn main() -> anyhow::Result<()> {
             .context("install Ctrl-C handler")?;
     }
 
-    scheduler::run(adapter, cfg.daemon, publisher, shutdown).await
+    match scheduler::run(adapter, cfg.daemon, publisher, shutdown).await {
+        Err(e) if e.downcast_ref::<scheduler::WatchdogTripped>().is_some() => {
+            log::error!("{e}");
+            std::process::exit(2);
+        }
+        other => other,
+    }
 }

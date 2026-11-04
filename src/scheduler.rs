@@ -61,6 +61,21 @@ pub fn watchdog_should_fire(count: u32, limit: u32) -> bool {
 /// commands, so anything near this long means the link is stuck.
 const POLL_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// Returned by `run` when the cycle-health watchdog gives up. The caller maps
+/// it to a distinct process exit code.
+#[derive(Debug)]
+pub struct WatchdogTripped {
+    pub cycles: u32,
+}
+
+impl std::fmt::Display for WatchdogTripped {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "watchdog tripped after {} consecutive failed cycles", self.cycles)
+    }
+}
+
+impl std::error::Error for WatchdogTripped {}
+
 pub async fn run(
     mut adapter: Box<dyn Adapter>,
     daemon: DaemonSection,
@@ -147,7 +162,8 @@ pub async fn run(
                         no_publish_cycles += 1;
                         if watchdog_should_fire(no_publish_cycles, limit) {
                             error!("watchdog tripped: {} consecutive cycles produced no data; exiting", no_publish_cycles);
-                            std::process::exit(2);
+                            adapter.disconnect().await;
+                            return Err(WatchdogTripped { cycles: no_publish_cycles }.into());
                         }
                         warn!("no data collected this cycle ({}/{})", no_publish_cycles, limit);
                     }
@@ -158,7 +174,8 @@ pub async fn run(
                     no_publish_cycles += 1;
                     if watchdog_should_fire(no_publish_cycles, limit) {
                         error!("watchdog tripped on transient errors; exiting");
-                        std::process::exit(2);
+                        adapter.disconnect().await;
+                        return Err(WatchdogTripped { cycles: no_publish_cycles }.into());
                     }
                     poll_deadline = Instant::now() + poll_interval;
                 }
@@ -218,6 +235,7 @@ mod tests {
     #[derive(Clone, Copy)]
     enum Step {
         Fatal,
+        Empty,
         Never,
     }
 
@@ -242,6 +260,7 @@ mod tests {
             self.events.lock().unwrap().push(("poll", Instant::now()));
             match self.polls.pop_front().unwrap_or(Step::Never) {
                 Step::Fatal => Err(AdapterError::FatalConn(anyhow::anyhow!("link lost"))),
+                Step::Empty => Ok(Metrics::new()),
                 Step::Never => std::future::pending().await,
             }
         }
@@ -285,6 +304,16 @@ mod tests {
         for w in connects.windows(2) {
             assert!(w[1] - w[0] >= Duration::from_secs(10), "{:?}", w[1] - w[0]);
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn consecutive_empty_polls_trip_the_watchdog() {
+        let (events, _sd, h) = harness(vec![Step::Empty; 40], false, 20);
+        let err = h.await.unwrap().expect_err("watchdog must end the run");
+        assert!(err.downcast_ref::<WatchdogTripped>().is_some(), "{err:#}");
+        let ev = events.lock().unwrap();
+        assert_eq!(ev.iter().filter(|e| e.0 == "poll").count(), 20);
+        assert_eq!(ev.last().unwrap().0, "disconnect");
     }
 
     #[tokio::test(start_paused = true)]
