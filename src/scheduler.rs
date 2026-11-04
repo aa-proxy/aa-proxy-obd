@@ -7,8 +7,9 @@ use crate::output::Publisher;
 use log::{error, info, warn};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::sync::Notify;
+use tokio::time::Instant;
 
 /// Cooperative shutdown signal. `trigger()` flips an AtomicBool (for cheap
 /// synchronous polling) and wakes every waiter on the Notify (for async
@@ -141,8 +142,13 @@ pub async fn run(
                     poll_deadline = Instant::now() + poll_interval;
                 }
                 Err(AdapterError::FatalConn(e)) => {
-                    info!("connection lost: {e:#}; reconnecting");
+                    info!("connection lost: {e:#}; reconnecting in {:?}", poll_interval);
                     adapter.disconnect().await;
+                    tokio::select! {
+                        biased;
+                        _ = shutdown.wait() => break 'connect,
+                        _ = tokio::time::sleep(poll_interval) => {}
+                    }
                     continue 'connect;
                 }
                 Err(AdapterError::Sleeping) => {
@@ -182,6 +188,93 @@ mod tests {
         // timeout will catch a hang.
         s.wait().await;
         assert!(!s.is_running());
+    }
+
+    use crate::adapter::Metrics;
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+
+    #[derive(Clone, Copy)]
+    enum Step {
+        Fatal,
+        Never,
+    }
+
+    type Events = Arc<Mutex<Vec<(&'static str, Instant)>>>;
+
+    struct Mock {
+        events: Events,
+        polls: VecDeque<Step>,
+        connect_never: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl Adapter for Mock {
+        async fn connect(&mut self) -> Result<(), AdapterError> {
+            self.events.lock().unwrap().push(("connect", Instant::now()));
+            if self.connect_never {
+                std::future::pending::<()>().await;
+            }
+            Ok(())
+        }
+        async fn poll(&mut self) -> Result<Metrics, AdapterError> {
+            self.events.lock().unwrap().push(("poll", Instant::now()));
+            match self.polls.pop_front().unwrap_or(Step::Never) {
+                Step::Fatal => Err(AdapterError::FatalConn(anyhow::anyhow!("link lost"))),
+                Step::Never => std::future::pending().await,
+            }
+        }
+        async fn disconnect(&mut self) {
+            self.events.lock().unwrap().push(("disconnect", Instant::now()));
+        }
+    }
+
+    fn harness(
+        polls: Vec<Step>,
+        connect_never: bool,
+        limit: u32,
+    ) -> (Events, Arc<Shutdown>, tokio::task::JoinHandle<anyhow::Result<()>>) {
+        let events: Events = Arc::new(Mutex::new(Vec::new()));
+        let mock = Mock { events: events.clone(), polls: polls.into(), connect_never };
+        let daemon = DaemonSection {
+            poll_interval_secs: 10.0,
+            cycle_failure_limit: limit,
+            ..DaemonSection::default()
+        };
+        let publisher = Publisher::new("http://localhost", None, 5, 300, true).unwrap();
+        let shutdown = Arc::new(Shutdown::new());
+        let h = tokio::spawn(run(Box::new(mock), daemon, publisher, shutdown.clone()));
+        (events, shutdown, h)
+    }
+
+    fn names(ev: &Events) -> Vec<&'static str> {
+        ev.lock().unwrap().iter().map(|e| e.0).collect()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn lost_links_are_paced_and_do_not_trip_the_watchdog() {
+        let (events, sd, h) = harness(vec![Step::Fatal; 40], false, 20);
+        tokio::time::sleep(Duration::from_secs(305)).await;
+        assert!(!h.is_finished(), "lost links must not end the run");
+        sd.trigger();
+        h.await.unwrap().expect("clean shutdown is Ok");
+        let ev = events.lock().unwrap();
+        let connects: Vec<Instant> = ev.iter().filter(|e| e.0 == "connect").map(|e| e.1).collect();
+        assert!(connects.len() > 20, "{}", connects.len());
+        for w in connects.windows(2) {
+            assert!(w[1] - w[0] >= Duration::from_secs(10), "{:?}", w[1] - w[0]);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_during_a_long_poll_ends_promptly() {
+        let (events, sd, h) = harness(vec![Step::Never], false, 20);
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        let t = Instant::now();
+        sd.trigger();
+        h.await.unwrap().expect("clean shutdown is Ok");
+        assert!(t.elapsed() < Duration::from_secs(1));
+        assert_eq!(names(&events), ["connect", "poll", "disconnect"]);
     }
 
     #[tokio::test]

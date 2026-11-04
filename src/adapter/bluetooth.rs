@@ -48,6 +48,7 @@ impl BluetoothElm327Adapter {
 #[async_trait]
 impl Adapter for BluetoothElm327Adapter {
     async fn connect(&mut self) -> Result<(), AdapterError> {
+        self.session.take();
         // Register the pairing agent once and keep it for the life of the
         // adapter; re-registering on every reconnect would repeatedly claim the
         // system default agent.
@@ -133,6 +134,10 @@ impl Adapter for BluetoothElm327Adapter {
             .ok_or_else(|| AdapterError::FatalConn(anyhow!("not connected")))?;
 
         poll_sources(session, &self.profile).await
+    }
+
+    async fn disconnect(&mut self) {
+        self.session.take();
     }
 }
 

@@ -27,6 +27,7 @@ impl UsbElm327Adapter {
 #[async_trait]
 impl Adapter for UsbElm327Adapter {
     async fn connect(&mut self) -> Result<(), AdapterError> {
+        self.session.take();
         info!("Opening USB serial port {} @ {} baud", self.port, self.baud);
         let stream = tokio_serial::new(&self.port, self.baud)
             .open_native_async()
@@ -49,5 +50,9 @@ impl Adapter for UsbElm327Adapter {
             .ok_or_else(|| AdapterError::FatalConn(anyhow!("not connected")))?;
 
         poll_sources(session, &self.profile).await
+    }
+
+    async fn disconnect(&mut self) {
+        self.session.take();
     }
 }
