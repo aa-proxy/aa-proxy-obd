@@ -5,7 +5,8 @@ use crate::adapter::Metrics;
 use log::warn;
 use reqwest::Client;
 use serde::Serialize;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::time::Instant;
 
 pub struct CircuitBreaker {
     threshold: u32,
@@ -66,20 +67,51 @@ pub struct TirePressureData {
     pub pressures_kpa: Vec<f32>,
 }
 
+/// Shortest replay limit: a cached payload is replayed only while it is no older than
+/// max(this, 2 x poll interval).
+pub const MIN_REPLAY_AGE: Duration = Duration::from_secs(600);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+#[derive(Clone)]
+struct Stamped<T> {
+    value: T,
+    stored_at: Instant,
+}
+
+impl<T> Stamped<T> {
+    fn new(value: T) -> Self { Self { value, stored_at: Instant::now() } }
+}
+
+/// Returns a clone of the cached value if it is still fresh; drops it otherwise.
+fn take_fresh<T: Clone>(slot: &mut Option<Stamped<T>>, max_age: Duration) -> Option<T> {
+    match slot {
+        Some(s) if s.stored_at.elapsed() <= max_age => Some(s.value.clone()),
+        Some(_) => { *slot = None; None }
+        None => None,
+    }
+}
+
 #[derive(Default, Clone)]
 pub struct PublishCache {
-    battery:        Option<BatteryData>,
-    odometer:       Option<OdometerData>,
-    tire_pressure:  Option<TirePressureData>,
+    battery:        Option<Stamped<BatteryData>>,
+    odometer:       Option<Stamped<OdometerData>>,
+    tire_pressure:  Option<Stamped<TirePressureData>>,
 }
 
 impl PublishCache {
-    pub fn last_battery(&self)       -> Option<&BatteryData>      { self.battery.as_ref() }
-    pub fn last_odometer(&self)      -> Option<&OdometerData>     { self.odometer.as_ref() }
-    pub fn last_tire_pressure(&self) -> Option<&TirePressureData> { self.tire_pressure.as_ref() }
-    pub fn store_battery(&mut self, b: BatteryData)            { self.battery = Some(b); }
-    pub fn store_odometer(&mut self, o: OdometerData)          { self.odometer = Some(o); }
-    pub fn store_tire_pressure(&mut self, t: TirePressureData) { self.tire_pressure = Some(t); }
+    #[cfg(test)]
+    pub fn last_battery(&self)       -> Option<&BatteryData>      { self.battery.as_ref().map(|s| &s.value) }
+    #[cfg(test)]
+    pub fn last_odometer(&self)      -> Option<&OdometerData>     { self.odometer.as_ref().map(|s| &s.value) }
+    pub fn store_battery(&mut self, b: BatteryData)            { self.battery = Some(Stamped::new(b)); }
+    pub fn store_odometer(&mut self, o: OdometerData)          { self.odometer = Some(Stamped::new(o)); }
+    pub fn store_tire_pressure(&mut self, t: TirePressureData) { self.tire_pressure = Some(Stamped::new(t)); }
+    /// Replay candidates: a payload older than `max_age` is dropped, not returned.
+    /// Reading never refreshes the stored time.
+    pub fn fresh_battery(&mut self, max_age: Duration)       -> Option<BatteryData>      { take_fresh(&mut self.battery, max_age) }
+    pub fn fresh_odometer(&mut self, max_age: Duration)      -> Option<OdometerData>     { take_fresh(&mut self.odometer, max_age) }
+    pub fn fresh_tire_pressure(&mut self, max_age: Duration) -> Option<TirePressureData> { take_fresh(&mut self.tire_pressure, max_age) }
     pub fn clear(&mut self) { *self = PublishCache::default(); }
 }
 
@@ -90,6 +122,7 @@ pub struct Publisher {
     breakers: tokio::sync::Mutex<Breakers>,
     cache: tokio::sync::Mutex<PublishCache>,
     bridge_dropouts: bool,
+    replay_limit: Duration,
 }
 
 struct Breakers {
@@ -105,10 +138,27 @@ impl Publisher {
         threshold: u32,
         breaker_secs: u64,
         bridge_dropouts: bool,
-    ) -> Self {
+    ) -> Result<Self, reqwest::Error> {
+        Self::with_timeouts(api_base, capacity_wh, threshold, breaker_secs, bridge_dropouts,
+            CONNECT_TIMEOUT, REQUEST_TIMEOUT)
+    }
+
+    pub(crate) fn with_timeouts(
+        api_base: impl Into<String>,
+        capacity_wh: Option<u32>,
+        threshold: u32,
+        breaker_secs: u64,
+        bridge_dropouts: bool,
+        connect_timeout: Duration,
+        request_timeout: Duration,
+    ) -> Result<Self, reqwest::Error> {
         let dur = Duration::from_secs(breaker_secs);
-        Self {
-            client: Client::new(),
+        let client = Client::builder()
+            .connect_timeout(connect_timeout)
+            .timeout(request_timeout)
+            .build()?;
+        Ok(Self {
+            client,
             api_base: api_base.into(),
             capacity_wh,
             breakers: tokio::sync::Mutex::new(Breakers {
@@ -118,7 +168,15 @@ impl Publisher {
             }),
             cache: tokio::sync::Mutex::new(PublishCache::default()),
             bridge_dropouts,
-        }
+            replay_limit: MIN_REPLAY_AGE,
+        })
+    }
+
+    /// Sets the replay limit to max(`MIN_REPLAY_AGE`, 2 x `poll_interval`), so a
+    /// slow poll cadence does not make every cached payload expire before reuse.
+    pub fn with_poll_interval(mut self, poll_interval: Duration) -> Self {
+        self.replay_limit = poll_interval.saturating_mul(2).max(MIN_REPLAY_AGE);
+        self
     }
 
     /// Called by the scheduler on AdapterError::Sleeping — drop stale telemetry.
@@ -172,39 +230,45 @@ impl Publisher {
     pub async fn publish(&self, m: &Metrics) -> bool {
         let mut any_ok = false;
 
-        let payload = match self.build_battery(m) {
-            Some(b) => Some(b),
-            None if self.bridge_dropouts => self.cache.lock().await.last_battery().cloned(),
-            None => None,
+        let (payload, replayed) = match self.build_battery(m) {
+            Some(b) => (Some(b), false),
+            None if self.bridge_dropouts => (self.cache.lock().await.fresh_battery(self.replay_limit), true),
+            None => (None, false),
         };
         if let Some(b) = payload {
             if self.attempt_battery(&b).await {
                 any_ok = true;
-                self.cache.lock().await.store_battery(b);
+                if !replayed {
+                    self.cache.lock().await.store_battery(b);
+                }
             }
         }
 
-        let payload = match self.build_odometer(m) {
-            Some(o) => Some(o),
-            None if self.bridge_dropouts => self.cache.lock().await.last_odometer().cloned(),
-            None => None,
+        let (payload, replayed) = match self.build_odometer(m) {
+            Some(o) => (Some(o), false),
+            None if self.bridge_dropouts => (self.cache.lock().await.fresh_odometer(self.replay_limit), true),
+            None => (None, false),
         };
         if let Some(o) = payload {
             if self.attempt_odometer(&o).await {
                 any_ok = true;
-                self.cache.lock().await.store_odometer(o);
+                if !replayed {
+                    self.cache.lock().await.store_odometer(o);
+                }
             }
         }
 
-        let payload = match self.build_tire_pressure(m) {
-            Some(t) => Some(t),
-            None if self.bridge_dropouts => self.cache.lock().await.last_tire_pressure().cloned(),
-            None => None,
+        let (payload, replayed) = match self.build_tire_pressure(m) {
+            Some(t) => (Some(t), false),
+            None if self.bridge_dropouts => (self.cache.lock().await.fresh_tire_pressure(self.replay_limit), true),
+            None => (None, false),
         };
         if let Some(t) = payload {
             if self.attempt_tire_pressure(&t).await {
                 any_ok = true;
-                self.cache.lock().await.store_tire_pressure(t);
+                if !replayed {
+                    self.cache.lock().await.store_tire_pressure(t);
+                }
             }
         }
 
@@ -288,14 +352,14 @@ mod tests {
 
     #[test]
     fn build_battery_omits_when_no_relevant_fields() {
-        let p = Publisher::new("http://test", None, 5, 300, true);
+        let p = Publisher::new("http://test", None, 5, 300, true).unwrap();
         assert!(p.build_battery(&Metrics::new()).is_none());
         assert!(p.build_battery(&metrics_with(&[("odometer_km", 12345.0)])).is_none());
     }
 
     #[test]
     fn build_battery_derives_level_wh_from_soc_and_capacity() {
-        let p = Publisher::new("http://test", Some(80000), 5, 300, true);
+        let p = Publisher::new("http://test", Some(80000), 5, 300, true).unwrap();
         let m = metrics_with(&[("battery_level_percentage", 50.0)]);
         let d = p.build_battery(&m).unwrap();
         assert_eq!(d.battery_level_percentage, Some(50.0));
@@ -305,7 +369,7 @@ mod tests {
 
     #[test]
     fn build_battery_prefers_explicit_level_wh_over_derived() {
-        let p = Publisher::new("http://test", Some(80000), 5, 300, true);
+        let p = Publisher::new("http://test", Some(80000), 5, 300, true).unwrap();
         let m = metrics_with(&[
             ("battery_level_percentage", 50.0),
             ("battery_level_wh", 12345.0),
@@ -316,7 +380,7 @@ mod tests {
 
     #[test]
     fn build_odometer_present_only_when_field_present() {
-        let p = Publisher::new("http://test", None, 5, 300, true);
+        let p = Publisher::new("http://test", None, 5, 300, true).unwrap();
         assert!(p.build_odometer(&Metrics::new()).is_none());
         let m = metrics_with(&[("odometer_km", 12345.0)]);
         let d = p.build_odometer(&m).unwrap();
@@ -325,7 +389,7 @@ mod tests {
 
     #[test]
     fn build_tire_pressure_requires_fl() {
-        let p = Publisher::new("http://test", None, 5, 300, true);
+        let p = Publisher::new("http://test", None, 5, 300, true).unwrap();
         let m = metrics_with(&[("tire_fr_kpa", 200.0)]);
         assert!(p.build_tire_pressure(&m).is_none());
 
@@ -342,7 +406,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(200))
             .mount(&server).await;
 
-        let p = Publisher::new(server.uri(), Some(80000), 5, 300, true);
+        let p = Publisher::new(server.uri(), Some(80000), 5, 300, true).unwrap();
         let m = metrics_with(&[("battery_level_percentage", 50.0)]);
         let ok = p.publish(&m).await;
         assert!(ok, "expected /battery POST to succeed");
@@ -356,7 +420,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(500))
             .mount(&server).await;
 
-        let p = Publisher::new(server.uri(), Some(80000), 3, 60, true);
+        let p = Publisher::new(server.uri(), Some(80000), 3, 60, true).unwrap();
         let m = metrics_with(&[("battery_level_percentage", 50.0)]);
         for _ in 0..3 { assert!(!p.publish(&m).await); } // 3 failures open the breaker
         assert!(!p.publish(&m).await);                    // open -> no POST
@@ -389,11 +453,72 @@ mod tests {
         Mock::given(method("POST")).and(path("/battery"))
             .respond_with(ResponseTemplate::new(200)).mount(&server).await;
 
-        let p = Publisher::new(server.uri(), Some(80000), 5, 300, true);
+        let p = Publisher::new(server.uri(), Some(80000), 5, 300, true).unwrap();
         let m = metrics_with(&[("battery_level_percentage", 50.0)]);
         assert!(p.publish(&m).await);              // real data: POST + cache
         assert!(p.publish(&Metrics::new()).await); // empty: cache replay -> POST
         assert_eq!(server.received_requests().await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn slow_endpoint_times_out_and_counts_as_failure() {
+        use wiremock::{matchers::{method, path}, Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/battery"))
+            .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(15)))
+            .mount(&server).await;
+
+        let p = Publisher::with_timeouts(server.uri(), Some(80000), 1, 60, true,
+            Duration::from_millis(200), Duration::from_millis(500)).unwrap();
+        let m = metrics_with(&[("battery_level_percentage", 50.0)]);
+        let started = std::time::Instant::now();
+        assert!(!p.publish(&m).await);
+        assert!(started.elapsed() < Duration::from_secs(5), "publish must not wait for the slow endpoint");
+        assert!(!p.breakers.lock().await.battery.allow(), "timeout should open the breaker (threshold 1)");
+    }
+
+    /// Backdates the cached battery payload so ageing needs no waiting.
+    async fn backdate_battery(p: &Publisher, age: Duration) {
+        let mut c = p.cache.lock().await;
+        c.battery.as_mut().unwrap().stored_at = Instant::now().checked_sub(age).unwrap();
+    }
+
+    #[tokio::test]
+    async fn cached_payload_is_replayed_until_max_age_then_dropped() {
+        use wiremock::{matchers::{method, path}, Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/battery"))
+            .respond_with(ResponseTemplate::new(200)).mount(&server).await;
+        let p = Publisher::new(server.uri(), Some(80000), 5, 300, true).unwrap();
+        let m = metrics_with(&[("battery_level_percentage", 50.0)]);
+
+        assert!(p.publish(&m).await);
+        backdate_battery(&p, Duration::from_secs(599)).await;
+        assert!(p.publish(&Metrics::new()).await, "599 s old payload is replayed");
+        let age = p.cache.lock().await.battery.as_ref().unwrap().stored_at.elapsed();
+        assert!(age >= Duration::from_secs(599), "replay must not refresh the age: {age:?}");
+
+        backdate_battery(&p, Duration::from_secs(601)).await;
+        assert!(!p.publish(&Metrics::new()).await, "601 s old payload is not replayed");
+        assert!(p.cache.lock().await.last_battery().is_none(), "expired payload is dropped");
+        assert_eq!(server.received_requests().await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn replay_limit_scales_with_slow_poll_interval() {
+        use wiremock::{matchers::{method, path}, Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/battery"))
+            .respond_with(ResponseTemplate::new(200)).mount(&server).await;
+        let p = Publisher::new(server.uri(), Some(80000), 5, 300, true).unwrap()
+            .with_poll_interval(Duration::from_secs(900));
+        let m = metrics_with(&[("battery_level_percentage", 50.0)]);
+
+        assert!(p.publish(&m).await);
+        backdate_battery(&p, Duration::from_secs(1000)).await;
+        assert!(p.publish(&Metrics::new()).await, "1000 s old payload is replayed at a 900 s poll");
+        backdate_battery(&p, Duration::from_secs(1801)).await;
+        assert!(!p.publish(&Metrics::new()).await, "1801 s old payload is not replayed");
     }
 
     #[tokio::test]
@@ -403,7 +528,7 @@ mod tests {
         Mock::given(method("POST")).and(path("/battery"))
             .respond_with(ResponseTemplate::new(200)).mount(&server).await;
 
-        let p = Publisher::new(server.uri(), Some(80000), 5, 300, false);
+        let p = Publisher::new(server.uri(), Some(80000), 5, 300, false).unwrap();
         let m = metrics_with(&[("battery_level_percentage", 50.0)]);
         assert!(p.publish(&m).await);
         assert!(!p.publish(&Metrics::new()).await); // no replay

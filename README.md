@@ -212,7 +212,7 @@ The subcommand discovers the device (if not already known to BlueZ, for up to 15
 
 ## Failure handling
 - **Per-endpoint circuit breaker.** After `publish_failure_threshold` consecutive POST failures on an endpoint (default 5), the daemon stops POSTing there for `publish_breaker_secs` (default 300s), then probes once and closes on success.
-- **`bridge_dropouts`.** When enabled (default), if a cycle produces no payload for an endpoint but the previous one did, the daemon re-POSTs the last-good value so downstream sees continuity. The cache clears when the car sleeps.
+- **`bridge_dropouts`.** When enabled (default), if a cycle produces no payload for an endpoint but the previous one did, the daemon re-POSTs the last-good value so downstream sees continuity, for at most the replay limit (10 minutes, or two poll intervals if longer); an older value is dropped. The cache clears when the car sleeps.
 - **Connection loss.** If the adapter link drops, the daemon disconnects and re-enters its connect/retry loop (`bt_max_connect_retries` attempts for Bluetooth types) rather than exiting.
 - **Cycle health watchdog.** If `cycle_failure_limit` consecutive poll cycles produce no data from the adapter (including cycles that end in a transient adapter error), the daemon logs an error and exits code 2 for a supervisor to act on. POST failures do not count: a healthy adapter whose endpoint is down is left to the circuit breaker. A cycle that finds the car asleep resets the counter. Set `cycle_failure_limit = 0` to disable the watchdog.
 
