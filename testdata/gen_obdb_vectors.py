@@ -15,6 +15,9 @@ MAP = {
   'TP_FL': ('tire_fl_kpa', PSI), 'TP_FR': ('tire_fr_kpa', PSI), 'TP_RL': ('tire_rl_kpa', PSI), 'TP_RR': ('tire_rr_kpa', PSI),
   'MG4_SOC': ('battery_level_percentage', 1), 'MG4_AAT': ('external_temp_celsius', 1),
   'ZOE_ODO': ('odometer_km', 1), 'ZOE_SOC_EVC': ('battery_level_percentage', 1),
+  # SAE J1979 mode 01 signal names
+  'RPM': ('rpm', 1), 'VSS': ('speed_kmh', 1), 'ECT': ('coolant_temp_c', 1),
+  'AAT': ('external_temp_celsius', 1), 'FLI': ('fuel_level_pct', 1),
 }
 # (vector id prefix, profile, OBDb repository, model years replayed or None for all)
 SOURCES = [
@@ -24,6 +27,9 @@ SOURCES = [
     ('mg4', 'mg4', 'MG-MG4', None),
     ('zoe', 'zoe', 'Renault-ZOE', None),
     ('kona', 'kona', 'Hyundai-Kona-Electric', None),
+    # Golf Mk7 (2013-2021) and the e-Golf built on it answer the same mode 01 PIDs on 7E0/7E8.
+    ('golf_mk7', 'golf_mk7', 'Volkswagen-Golf', range(2013, 2022)),
+    ('golf_mk7-egolf', 'golf_mk7', 'Volkswagen-e-Golf', range(2014, 2021)),
 ]
 
 def repo_commit(repo):

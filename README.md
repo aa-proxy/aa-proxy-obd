@@ -24,12 +24,15 @@ A single Linux daemon that reads live EV telemetry (battery, odometer, tire pres
 | Hyundai Kona Electric | `kona` | ✅ |    | ✅ | ✅ | ✅ |
 | MG4             | `mg4`    | ✅ |    | ✅ |    |    |
 | Kia Niro        | `niro`   | ✅ |    |    |    |    |
+| VW Golf Mk7     | `golf_mk7` |    |    |    |    |    |
 
 The `niro` profile is checked against OBDb recordings (model years 2019-2026), not on a car.
 
 The `kona` profile covers the first-generation Kona Electric (model years 2019-2024) and is checked against OBDb recordings, not on a car. It reports no Wh directly; with `battery_capacity_wh` set, the daemon derives `battery_level_wh` from SOC.
 
 The `ev6`, `ioniq5` and `kona` profiles additionally report `battery_state_of_health`, `battery_voltage`, `battery_current` and `interior_temp_celsius`. Adding a new vehicle requires no Rust changes — see [Vehicle profiles](#vehicle-profiles).
+
+The `golf_mk7` profile was contributed by a Golf Mk7 owner. It reads `rpm`, `speed_kmh`, `coolant_temp_c`, `external_temp_celsius` and `fuel_level_pct` from standard OBD-II PIDs. The car reports no state of charge, so no `/battery` payload is sent (see [What it transmits](#what-it-transmits)) and its values reach aa-proxy-rs only through [`raw_topic`](#overlay-data-raw_topic), for example for the overlay. It is checked against OBDb recordings of the Golf (model years 2013-2021) and of the e-Golf built on it (2014-2020), not on a car by the maintainers.
 
 WiCAN Pro users get whatever their AutoPid configuration exposes (typically SOC plus outdoor temperature); the WiCAN firmware decodes PIDs itself, so the daemon does not load a `profiles/` file for `device.type = "wican"`.
 

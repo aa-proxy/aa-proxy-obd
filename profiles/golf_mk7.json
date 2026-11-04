@@ -1,0 +1,28 @@
+{
+  "name": "VW Golf Mk7",
+  "elm327": {
+    "init": ["ATZ", "ATE0", "ATH0", "ATAL", "ATSP6"]
+  },
+  "sources": [
+    {
+      "kind": "uds_pid", "ecu_tx": "7E0", "ecu_rx": "7E8", "pid": "010C",
+      "fields": [{"name": "rpm", "byte_index": -2, "length": 2, "multiplier": 0.25, "offset": 0.0}]
+    },
+    {
+      "kind": "uds_pid", "ecu_tx": "7E0", "ecu_rx": "7E8", "pid": "010D",
+      "fields": [{"name": "speed_kmh", "byte_index": -1, "length": 1, "multiplier": 1.0, "offset": 0.0}]
+    },
+    {
+      "kind": "uds_pid", "ecu_tx": "7E0", "ecu_rx": "7E8", "pid": "0105",
+      "fields": [{"name": "coolant_temp_c", "byte_index": -1, "length": 1, "multiplier": 1.0, "offset": -40.0}]
+    },
+    {
+      "kind": "uds_pid", "ecu_tx": "7E0", "ecu_rx": "7E8", "pid": "0146",
+      "fields": [{"name": "external_temp_celsius", "byte_index": -1, "length": 1, "multiplier": 1.0, "offset": -40.0}]
+    },
+    {
+      "kind": "uds_pid", "ecu_tx": "7E0", "ecu_rx": "7E8", "pid": "012F",
+      "fields": [{"name": "fuel_level_pct", "byte_index": -1, "length": 1, "multiplier": 0.392157, "offset": 0.0}]
+    }
+  ]
+}
