@@ -103,21 +103,117 @@ pub struct Config {
     pub daemon:  DaemonSection,
 }
 
+const PLACEHOLDER_MAC: &str = "AA:BB:CC:DD:EE:FF";
+const MIN_INTERVAL_SECS: f32 = 0.1;
+
+const DEVICE_KEYS: &[&str] = &[
+    "type", "bt_mac", "bt_passkey", "bt_max_connect_retries", "bt_timeout_secs",
+    "usb_port", "usb_baud",
+];
+const VEHICLE_KEYS: &[&str] = &["profile", "battery_capacity_wh"];
+const DAEMON_KEYS: &[&str] = &[
+    "poll_interval_secs", "car_sleep_interval_secs", "log_level", "log_file",
+    "api_base_url", "bridge_dropouts", "publish_failure_threshold",
+    "publish_breaker_secs", "cycle_failure_limit",
+];
+
+fn invalid(msg: String) -> Error {
+    Error::new(ErrorKind::InvalidData, msg)
+}
+
+fn check_interval(key: &str, value: f32) -> io::Result<()> {
+    if !value.is_finite() || value < MIN_INTERVAL_SECS {
+        return Err(invalid(format!(
+            "daemon.{key} must be a finite number >= {MIN_INTERVAL_SECS}, got {value}"
+        )));
+    }
+    if std::time::Duration::try_from_secs_f32(value).is_err() {
+        return Err(invalid(format!("daemon.{key} is too large: {value}")));
+    }
+    Ok(())
+}
+
+/// Paths ("section.key", or just "section") of every key that no section
+/// defines.
+fn unknown_keys(value: &toml::Value) -> Vec<String> {
+    let mut out = Vec::new();
+    let Some(root) = value.as_table() else { return out };
+    for (section, body) in root {
+        let known: &[&str] = match section.as_str() {
+            "device" => DEVICE_KEYS,
+            "vehicle" => VEHICLE_KEYS,
+            "daemon" => DAEMON_KEYS,
+            _ => {
+                out.push(section.clone());
+                continue;
+            }
+        };
+        if let Some(table) = body.as_table() {
+            for key in table.keys() {
+                if !known.contains(&key.as_str()) {
+                    out.push(format!("{section}.{key}"));
+                }
+            }
+        }
+    }
+    out
+}
+
 impl Config {
+    /// Reads, parses and validates the file. Unknown-key warnings are logged,
+    /// so the logger must already be installed.
     pub fn load(path: &Path) -> io::Result<Self> {
+        let (cfg, warnings) = Self::load_with_warnings(path)?;
+        for w in warnings {
+            log::warn!("{w}");
+        }
+        Ok(cfg)
+    }
+
+    /// Like [`Config::load`], but returns the unknown-key warnings instead of
+    /// logging them, for callers that install the logger from the config.
+    pub fn load_with_warnings(path: &Path) -> io::Result<(Self, Vec<String>)> {
         let raw = fs::read_to_string(path).map_err(|e| {
             Error::new(
-                ErrorKind::NotFound,
+                e.kind(),
                 format!("Failed to read config '{}': {}", path.display(), e),
             )
         })?;
-        let cfg: Config = toml::from_str(&raw).map_err(|e| {
-            Error::new(
-                ErrorKind::InvalidData,
-                format!("Failed to parse TOML in '{}': {}", path.display(), e),
-            )
+        Self::parse(&raw, path)
+    }
+
+    fn parse(raw: &str, path: &Path) -> io::Result<(Self, Vec<String>)> {
+        let cfg: Config = toml::from_str(raw).map_err(|e| {
+            invalid(format!("Failed to parse TOML in '{}': {}", path.display(), e))
         })?;
-        Ok(cfg)
+        cfg.validate().map_err(|e| {
+            Error::new(e.kind(), format!("Invalid config '{}': {}", path.display(), e))
+        })?;
+        let warnings = match toml::from_str::<toml::Value>(raw) {
+            Ok(v) => unknown_keys(&v)
+                .into_iter()
+                .map(|k| format!("Unknown config key '{k}' in '{}' (ignored)", path.display()))
+                .collect(),
+            Err(_) => Vec::new(),
+        };
+        Ok((cfg, warnings))
+    }
+
+    pub fn validate(&self) -> io::Result<()> {
+        let d = &self.daemon;
+        check_interval("poll_interval_secs", d.poll_interval_secs)?;
+        check_interval("car_sleep_interval_secs", d.car_sleep_interval_secs)?;
+        if self.device.usb_baud == Some(0) {
+            return Err(invalid("device.usb_baud must be >= 1".into()));
+        }
+        if let Some(mac) = &self.device.bt_mac {
+            if mac.trim().eq_ignore_ascii_case(PLACEHOLDER_MAC) {
+                return Err(invalid(format!(
+                    "device.bt_mac is the placeholder {PLACEHOLDER_MAC}; set it to your adapter's MAC address"
+                )));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -183,6 +279,127 @@ mod tests {
         assert_eq!(cfg.daemon.publish_failure_threshold, 3);
         assert_eq!(cfg.daemon.publish_breaker_secs, 60);
         assert_eq!(cfg.daemon.cycle_failure_limit, 10);
+    }
+
+    fn parse(src: &str) -> io::Result<(Config, Vec<String>)> {
+        Config::parse(src, Path::new("test.toml"))
+    }
+
+    fn with_daemon(lines: &str) -> String {
+        format!("[device]\ntype = \"bluetooth\"\n[daemon]\n{lines}\n")
+    }
+
+    #[test]
+    fn rejects_bad_intervals_naming_the_key() {
+        for bad in ["-1.0", "0", "0.05", "nan", "inf", "1e30"] {
+            for key in ["poll_interval_secs", "car_sleep_interval_secs"] {
+                let e = parse(&with_daemon(&format!("{key} = {bad}"))).unwrap_err();
+                assert_eq!(e.kind(), ErrorKind::InvalidData, "{key}={bad}");
+                assert!(e.to_string().contains(key), "{key}={bad}: {e}");
+            }
+        }
+        assert!(parse(&with_daemon("poll_interval_secs = 0.1")).is_ok());
+    }
+
+    #[test]
+    fn zero_threshold_is_accepted_and_zero_baud_rejected() {
+        assert!(parse(&with_daemon("publish_failure_threshold = 0")).is_ok());
+        let e = parse("[device]\ntype = \"usb\"\nusb_baud = 0\n").unwrap_err();
+        assert!(e.to_string().contains("usb_baud"));
+        // Zero disables the watchdog and the breaker timer; both stay valid.
+        assert!(parse(&with_daemon("cycle_failure_limit = 0\npublish_breaker_secs = 0")).is_ok());
+    }
+
+    #[test]
+    fn out_of_range_passkey_still_loads() {
+        // The range is enforced when the agent registers, so `pair` can load
+        // a config holding a bad value and replace it.
+        let bad = "[device]\ntype = \"bluetooth\"\nbt_passkey = 1000000\n";
+        let cfg = parse(bad).unwrap();
+        assert_eq!(cfg.0.device.bt_passkey, Some(1_000_000));
+    }
+
+    #[test]
+    fn placeholder_mac_is_rejected_case_insensitively() {
+        for mac in ["AA:BB:CC:DD:EE:FF", "aa:bb:cc:dd:ee:ff"] {
+            let src = format!("[device]\ntype = \"bluetooth\"\nbt_mac = \"{mac}\"\n");
+            let e = parse(&src).unwrap_err();
+            assert!(e.to_string().contains("bt_mac"), "{e}");
+            assert!(e.to_string().contains("adapter's MAC"), "{e}");
+        }
+        let src = "[device]\ntype = \"bluetooth\"\nbt_mac = \"11:22:33:44:55:66\"\n";
+        assert!(parse(src).is_ok());
+    }
+
+    #[test]
+    fn unknown_keys_are_reported_but_load() {
+        let src = r#"
+            [device]
+            type = "bluetooth"
+            bt_mak = "11:22:33:44:55:66"
+            [daemon]
+            poll_intervall_secs = 5
+            [extra]
+            x = 1
+        "#;
+        let (cfg, warnings) = parse(src).unwrap();
+        assert_eq!(cfg.device.kind, DeviceType::Bluetooth);
+        assert_eq!(warnings.len(), 3, "{warnings:?}");
+        let all = warnings.join("\n");
+        for key in ["device.bt_mak", "daemon.poll_intervall_secs", "'extra'"] {
+            assert!(all.contains(key), "missing {key} in {all}");
+        }
+    }
+
+    #[test]
+    fn read_errors_keep_their_kind() {
+        let missing = Path::new(env!("CARGO_MANIFEST_DIR")).join("does-not-exist.toml");
+        let e = Config::load_with_warnings(&missing).unwrap_err();
+        assert_eq!(e.kind(), ErrorKind::NotFound);
+
+        // Reading a directory fails with a kind other than NotFound.
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let e = Config::load_with_warnings(dir).unwrap_err();
+        assert_ne!(e.kind(), ErrorKind::NotFound, "{e}");
+        assert_eq!(e.kind(), fs::read_to_string(dir).unwrap_err().kind());
+    }
+
+    #[test]
+    fn known_key_lists_match_the_struct_fields() {
+        let cfg = Config {
+            device: DeviceConfig {
+                kind: DeviceType::Usb,
+                bt_mac: Some("11:22:33:44:55:66".into()),
+                bt_passkey: Some(1),
+                bt_max_connect_retries: Some(1),
+                bt_timeout_secs: Some(1),
+                usb_port: Some("p".into()),
+                usb_baud: Some(1),
+            },
+            vehicle: VehicleSection { profile: Some("p".into()), battery_capacity_wh: Some(1) },
+            daemon: DaemonSection::default(),
+        };
+        let value = toml::Value::try_from(&cfg).unwrap();
+        for (section, known) in [("device", DEVICE_KEYS), ("vehicle", VEHICLE_KEYS), ("daemon", DAEMON_KEYS)] {
+            let mut got: Vec<&str> =
+                value[section].as_table().unwrap().keys().map(String::as_str).collect();
+            let mut want = known.to_vec();
+            got.sort_unstable();
+            want.sort_unstable();
+            assert_eq!(got, want, "section {section}");
+        }
+        assert_eq!(value.as_table().unwrap().len(), 3);
+        assert!(unknown_keys(&value).is_empty());
+    }
+
+    #[test]
+    fn shipped_config_loads_without_bt_mac() {
+        // bt_mac is optional at load; adapter setup in main requires it for
+        // the bluetooth and wican types.
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("configs/aa-proxy-obd.toml");
+        let (cfg, warnings) = Config::load_with_warnings(&path).unwrap();
+        assert!(cfg.device.bt_mac.is_none());
+        assert!(warnings.is_empty(), "{warnings:?}");
     }
 
     #[test]

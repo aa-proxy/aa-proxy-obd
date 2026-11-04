@@ -59,11 +59,14 @@ async fn main() -> anyhow::Result<()> {
         return cli::pair::run(&args.config, *passkey).await;
     }
 
-    let cfg = match Config::load(&args.config) {
+    let (cfg, config_warnings) = match Config::load_with_warnings(&args.config) {
         Ok(c) => c,
         Err(e) => { eprintln!("aa-proxy-obd: config load failed: {e}"); std::process::exit(1); }
     };
     logging::init(&cfg.daemon.log_level, &cfg.daemon.log_file, args.debug);
+    for w in &config_warnings {
+        log::warn!("{w}");
+    }
     info!("<b><blue>aa-proxy-obd</> started");
     info!("Using config file: <b><blue>{:?}</>", args.config);
 

@@ -125,6 +125,8 @@ cycle_failure_limit       = 20
 
 The `wican` device type connects over Bluetooth, so it shares the `bt_*` options (`bt_mac`, `bt_passkey`, `bt_max_connect_retries`, `bt_timeout_secs`). Keys under `[device]` that don't apply to the selected `type` are ignored. `poll_interval_secs` and `car_sleep_interval_secs` accept fractional values. `log_level` values other than those listed fall back to `info`.
 
+The config is validated at load and a failure exits with code 1 and a message naming the key. `poll_interval_secs` and `car_sleep_interval_secs` must be finite and at least 0.1; `usb_baud` must be at least 1; `bt_mac` must not be the placeholder `AA:BB:CC:DD:EE:FF` shown in the examples above, so set it to the adapter's MAC. Unknown keys (for example a misspelled `poll_intervall_secs`) are logged as warnings and ignored.
+
 ## Vehicle profiles
 Profile JSON files ship under [`profiles/`](profiles/). At install time, copy them to `/etc/aa-proxy-obd/<profile>.json` (e.g. `profiles/ev6.json` → `/etc/aa-proxy-obd/ev6.json`). The daemon lowercases `vehicle.profile` before building the path, so the file name must be lowercase.
 

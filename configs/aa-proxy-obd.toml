@@ -34,8 +34,9 @@
 [device]
 type                      = "bluetooth"                # bluetooth | usb | wican
 
-bt_mac                    = "AA:BB:CC:DD:EE:FF"        # bluetooth + wican; the adapter's MAC
-bt_passkey                = 1234                       # optional; enables in-process pairing
+# Set bt_mac to the adapter's MAC before use; the placeholder value is rejected at load.
+# bt_mac                  = "AA:BB:CC:DD:EE:FF"        # bluetooth + wican; the adapter's MAC
+# bt_passkey              = 1234                       # optional (at most 999999); enables in-process pairing
 
 [vehicle]
 profile                   = "ioniq5"                   # ignored when device.type = "wican"

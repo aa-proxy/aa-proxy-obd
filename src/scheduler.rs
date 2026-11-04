@@ -62,8 +62,11 @@ pub async fn run(
     publisher: Publisher,
     shutdown: Arc<Shutdown>,
 ) -> anyhow::Result<()> {
-    let poll_interval = Duration::from_secs_f32(daemon.poll_interval_secs);
-    let sleep_interval = Duration::from_secs_f32(daemon.car_sleep_interval_secs);
+    let poll_interval = Duration::try_from_secs_f32(daemon.poll_interval_secs)
+        .map_err(|e| anyhow::anyhow!("invalid daemon.poll_interval_secs {}: {e}", daemon.poll_interval_secs))?;
+    let sleep_interval = Duration::try_from_secs_f32(daemon.car_sleep_interval_secs).map_err(|e| {
+        anyhow::anyhow!("invalid daemon.car_sleep_interval_secs {}: {e}", daemon.car_sleep_interval_secs)
+    })?;
     let mut poll_deadline = Instant::now();
     let mut no_publish_cycles: u32 = 0;
     let limit = daemon.cycle_failure_limit;
