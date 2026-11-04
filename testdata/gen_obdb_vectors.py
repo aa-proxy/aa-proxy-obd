@@ -15,7 +15,19 @@ MAP = {
   'TP_FL': ('tire_fl_kpa', PSI), 'TP_FR': ('tire_fr_kpa', PSI), 'TP_RL': ('tire_rl_kpa', PSI), 'TP_RR': ('tire_rr_kpa', PSI),
   'MG4_SOC': ('battery_level_percentage', 1), 'MG4_AAT': ('external_temp_celsius', 1),
   'ZOE_ODO': ('odometer_km', 1), 'ZOE_SOC_EVC': ('battery_level_percentage', 1),
-  # SAE J1979 mode 01 signal names
+  # Hyundai/Kia battery, motor and speed signals (EV6, IONIQ 5, Kona Electric)
+  'BATTERY_MAX_T': ('battery_temp_max_celsius', 1), 'BATTERY_MIN_T': ('battery_temp_min_celsius', 1),
+  'BATTERY_PACK_B01': ('battery_module_1_temp_celsius', 1), 'BATTERY_PACK_B02': ('battery_module_2_temp_celsius', 1),
+  'BATTERY_PACK_B03': ('battery_module_3_temp_celsius', 1), 'BATTERY_PACK_B04': ('battery_module_4_temp_celsius', 1),
+  'BATTERY_PACK_B05': ('battery_module_5_temp_celsius', 1), 'BATTERY_INLET_T': ('battery_inlet_temp_celsius', 1),
+  'AUXILLARY_BATTERY_VOLTAGE': ('aux_battery_voltage', 1), 'DRIVE_MOTOR_SPEED_1': ('motor_rpm', 1),
+  'ISOLATION_RESISTANCE': ('isolation_resistance_kohm', 1),
+  'HVBAT_T_MAX': ('battery_temp_max_celsius', 1), 'HVBAT_T_MIN': ('battery_temp_min_celsius', 1),
+  'HVBAT_MOD1_T': ('battery_module_1_temp_celsius', 1), 'HVBAT_MOD2_T': ('battery_module_2_temp_celsius', 1),
+  'HVBAT_MOD3_T': ('battery_module_3_temp_celsius', 1), 'HVBAT_MOD4_T': ('battery_module_4_temp_celsius', 1),
+  'HVBAT_INLET_T': ('battery_inlet_temp_celsius', 1), 'VPWR': ('aux_battery_voltage', 1),
+  'RPM_2': ('motor_rpm', 1), 'ISO_R': ('isolation_resistance_kohm', 1), 'VSS_7B3': ('speed_kmh', 1),
+  'HVBAT_CHG_P_AVAIL': ('charge_power_available_kw', 1), 'HVBAT_DCHG_P_AVAIL': ('discharge_power_available_kw', 1),  # SAE J1979 mode 01 signal names
   'RPM': ('rpm', 1), 'VSS': ('speed_kmh', 1), 'ECT': ('coolant_temp_c', 1),
   'AAT': ('external_temp_celsius', 1), 'FLI': ('fuel_level_pct', 1),
 }

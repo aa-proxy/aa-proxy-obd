@@ -30,7 +30,11 @@ The `niro` profile is checked against OBDb recordings (model years 2019-2026), n
 
 The `kona` profile covers the first-generation Kona Electric (model years 2019-2024) and is checked against OBDb recordings, not on a car. It reports no Wh directly; with `battery_capacity_wh` set, the daemon derives `battery_level_wh` from SOC.
 
-The `ev6`, `ioniq5` and `kona` profiles additionally report `battery_state_of_health`, `battery_voltage`, `battery_current` and `interior_temp_celsius`. Adding a new vehicle requires no Rust changes — see [Vehicle profiles](#vehicle-profiles).
+The `ev6`, `ioniq5` and `kona` profiles additionally report `battery_state_of_health`, `battery_voltage`, `battery_current` and `interior_temp_celsius`.
+
+The `ev6`, `ioniq5` and `kona` profiles also read extra battery, motor and speed fields: `aux_battery_voltage`, `battery_temp_max_celsius`, `battery_temp_min_celsius`, `battery_module_<n>_temp_celsius` (five modules on the `ev6` and `ioniq5`, four on the `kona`), `motor_rpm` and `speed_kmh`. They reach aa-proxy-rs through `raw_topic` (see [Overlay data](#overlay-data-raw_topic)); aa-proxy-rs ignores them on `/battery`. Further fields are defined but switched off with `"enabled": false`: `battery_inlet_temp_celsius`, `isolation_resistance_kohm`, `cell_voltage_max`, `cell_voltage_min`, the four `tire_*_temp_celsius` fields, and on the `kona` also `charge_power_available_kw` and `discharge_power_available_kw`. Set `"enabled": true` in the profile file to read them.
+
+Adding a new vehicle requires no Rust changes — see [Vehicle profiles](#vehicle-profiles).
 
 The `golf_mk7` profile was contributed by a Golf Mk7 owner. It reads `rpm`, `speed_kmh`, `coolant_temp_c`, `external_temp_celsius` and `fuel_level_pct` from standard OBD-II PIDs. The car reports no state of charge, so no `/battery` payload is sent (see [What it transmits](#what-it-transmits)) and its values reach aa-proxy-rs only through [`raw_topic`](#overlay-data-raw_topic), for example for the overlay. It is checked against OBDb recordings of the Golf (model years 2013-2021) and of the e-Golf built on it (2014-2020), not on a car by the maintainers.
 
