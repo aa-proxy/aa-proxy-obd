@@ -92,7 +92,10 @@ impl Adapter for BluetoothElm327Adapter {
                 debug!("Waiting for local address...");
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 i += 1;
-                if i > 5 { break; }
+                if i > 5 {
+                    warn!("local address still unset after {i} waits; continuing");
+                    break;
+                }
             }
 
             // RFCOMM connect() returns Ok as soon as BlueZ accepts the local
