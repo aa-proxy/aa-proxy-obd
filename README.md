@@ -26,7 +26,7 @@ A single Linux daemon that reads live EV telemetry (battery, odometer, tire pres
 | Kia Niro        | `niro`   | ✅ |    |    |    |    |
 | VW Golf Mk7     | `golf_mk7` |    |    |    |    |    |
 
-The `niro` profile is checked against OBDb recordings (model years 2019-2026), not on a car.
+The `niro` profile is checked against OBDb recordings (model years 2019-2026), not on a car. Besides the state of charge it reads `battery_voltage`, `battery_current`, `aux_battery_voltage`, `battery_temp_max_celsius`, `battery_temp_min_celsius`, `battery_module_<n>_temp_celsius` (four modules) from the same `220101` reply, so no extra request is needed. They reach aa-proxy-rs through `raw_topic`; aa-proxy-rs accepts and ignores `battery_voltage` and `battery_current` on `/battery`. The sign of `battery_current` is not documented for this car and is sent as read. Switched off with `"enabled": false`: `battery_inlet_temp_celsius`, `isolation_resistance_kohm`, `cell_voltage_max`, `cell_voltage_min`, `charge_power_available_kw`, `discharge_power_available_kw`, `charging_flag`, `dc_plug_flag`, `ac_plug_flag` and `main_relay_flag`.
 
 The `kona` profile covers the first-generation Kona Electric (model years 2019-2024) and is checked against OBDb recordings, not on a car. It reports no Wh directly; with `battery_capacity_wh` set, the daemon derives `battery_level_wh` from SOC.
 

@@ -7,7 +7,26 @@
       "ecu_rx": "7EC",
       "pid": "220101",
       "fields": [
-        {"name": "battery_level_percentage", "byte_index": 4, "length": 1, "multiplier": 0.5, "offset": 0.0}
+        {"name": "battery_level_percentage", "byte_index": 4, "length": 1, "multiplier": 0.5, "offset": 0.0},
+        {"name": "battery_voltage", "byte_index": 12, "length": 2, "multiplier": 0.1, "offset": 0.0},
+        {"name": "battery_current", "byte_index": 10, "length": 2, "multiplier": 0.1, "offset": 0.0, "signed": true},
+        {"name": "aux_battery_voltage", "byte_index": 29, "length": 1, "multiplier": 0.1, "offset": 0.0},
+        {"name": "battery_temp_max_celsius", "byte_index": 14, "length": 1, "multiplier": 1.0, "offset": 0.0, "signed": true},
+        {"name": "battery_temp_min_celsius", "byte_index": 15, "length": 1, "multiplier": 1.0, "offset": 0.0, "signed": true},
+        {"name": "battery_module_1_temp_celsius", "byte_index": 16, "length": 1, "multiplier": 1.0, "offset": 0.0, "signed": true},
+        {"name": "battery_module_2_temp_celsius", "byte_index": 17, "length": 1, "multiplier": 1.0, "offset": 0.0, "signed": true},
+        {"name": "battery_module_3_temp_celsius", "byte_index": 18, "length": 1, "multiplier": 1.0, "offset": 0.0, "signed": true},
+        {"name": "battery_module_4_temp_celsius", "byte_index": 19, "length": 1, "multiplier": 1.0, "offset": 0.0, "signed": true},
+        {"name": "battery_inlet_temp_celsius", "byte_index": 22, "length": 1, "multiplier": 1.0, "offset": 0.0, "signed": true, "enabled": false},
+        {"name": "isolation_resistance_kohm", "byte_index": 57, "length": 2, "multiplier": 1.0, "offset": 0.0, "enabled": false},
+        {"name": "cell_voltage_max", "byte_index": 23, "length": 1, "multiplier": 0.02, "offset": 0.0, "enabled": false},
+        {"name": "cell_voltage_min", "byte_index": 25, "length": 1, "multiplier": 0.02, "offset": 0.0, "enabled": false},
+        {"name": "charge_power_available_kw", "byte_index": 5, "length": 2, "multiplier": 0.01, "offset": 0.0, "enabled": false},
+        {"name": "discharge_power_available_kw", "byte_index": 7, "length": 2, "multiplier": 0.01, "offset": 0.0, "enabled": false},
+        {"name": "charging_flag", "bit_offset": 72, "bit_length": 1, "enabled": false},
+        {"name": "dc_plug_flag", "bit_offset": 73, "bit_length": 1, "enabled": false},
+        {"name": "ac_plug_flag", "bit_offset": 74, "bit_length": 1, "enabled": false},
+        {"name": "main_relay_flag", "bit_offset": 79, "bit_length": 1, "enabled": false}
       ]
     }
   ]

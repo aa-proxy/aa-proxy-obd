@@ -32,7 +32,10 @@ MAP = {
   'DC_CHRG_STATE': ('dc_charging', 1), 'AC_CHRG_STATE': ('ac_charging', 1),
   'OBC_CHRG_DC_VOLTAGE': ('obc_dc_voltage', 1), 'OBC_CHRG_DC_CURRENT': ('obc_dc_current', 1),
   'OBC_CHRG_AC_CURRENT': ('obc_ac_current', 1), 'OBC_CHRG_AC_VOLTAGE': ('obc_ac_voltage', 1),
-  'ESTIMATED_CHRG_POWER': ('charge_power_estimate', 1), 'AUX_BATTERY_VOLTAGE': ('aux_battery_voltage_precise', 1),  'RPM': ('rpm', 1), 'VSS': ('speed_kmh', 1), 'ECT': ('coolant_temp_c', 1),
+  'ESTIMATED_CHRG_POWER': ('charge_power_estimate', 1), 'AUX_BATTERY_VOLTAGE': ('aux_battery_voltage_precise', 1),  # Kia Niro EV 220101 (names differ from the Hyundai ones)
+  'NIROEV_C_V_MAX': ('cell_voltage_max', 1), 'NIROEV_C_V_MIN': ('cell_voltage_min', 1),
+  'HVBAT_CHARGING': ('charging_flag', 1), 'HVBAT_PLUG_RAPD': ('dc_plug_flag', 1), 'HVBAT_PLUG_NORM': ('ac_plug_flag', 1),
+  'BMS_MAIN_RELAY': ('main_relay_flag', 1),  'RPM': ('rpm', 1), 'VSS': ('speed_kmh', 1), 'ECT': ('coolant_temp_c', 1),
   'AAT': ('external_temp_celsius', 1), 'FLI': ('fuel_level_pct', 1),
 }
 # (vector id prefix, profile, OBDb repository, model years replayed or None for all)
