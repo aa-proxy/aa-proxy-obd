@@ -83,6 +83,18 @@ fn render_markup(line: &str, colorize: bool) -> String {
     out
 }
 
+const RESET: &str = "\x1b[0m";
+
+/// Console form of a line: markup rendered, and with colour on, ended with a
+/// single ANSI reset so an unclosed tag cannot colour the lines that follow.
+fn render_console_line(line: &str, colorize: bool) -> String {
+    let mut out = render_markup(line, colorize);
+    if colorize && !out.ends_with(RESET) {
+        out.push_str(RESET);
+    }
+    out
+}
+
 const FALLBACK_LEVEL: LevelFilter = LevelFilter::Info;
 
 /// Resolves the configured level. The second value is a warning to emit once
@@ -109,7 +121,7 @@ pub fn init(log_level: &str, log_file: &str, debug_override: bool) -> Result<(),
     let console = fern::Dispatch::new()
         .format(move |out, message, record| {
             let line = format!("{} [{}] {message}", timestamp(), level_markup(record.level()));
-            out.finish(format_args!("{}", render_markup(&line, colorize)))
+            out.finish(format_args!("{}", render_console_line(&line, colorize)))
         })
         .chain(std::io::stdout());
 
@@ -204,6 +216,23 @@ mod tests {
             assert_eq!(render_markup("ends with <", colorize), "ends with <");
             assert_eq!(render_markup("<< double", colorize), "<< double");
         }
+    }
+
+    #[test]
+    fn console_line_with_unclosed_tag_ends_with_reset_only_when_colour_is_on() {
+        let on = render_console_line("<red>never closed", true);
+        assert!(on.ends_with("\x1b[0m"), "{on:?}");
+        let off = render_console_line("<red>never closed", false);
+        assert_eq!(off, "never closed");
+        assert!(!off.contains('\x1b'));
+    }
+
+    #[test]
+    fn console_line_with_closed_tag_has_a_single_trailing_reset() {
+        let on = render_console_line("<red>closed</>", true);
+        assert!(on.ends_with(RESET), "{on:?}");
+        assert!(!on.ends_with("\x1b[0m\x1b[0m"), "{on:?}");
+        assert_eq!(on.matches(RESET).count(), 1, "{on:?}");
     }
 
     #[test]
