@@ -540,7 +540,7 @@ pub fn get_payload(response: &str) -> Vec<u8> {
 /// the MSB of byte 0. bit_length is 1..=16. Reads contiguously across bytes.
 fn extract_bits(payload: &[u8], bit_offset: u32, bit_length: u32) -> Option<u32> {
     if bit_length == 0 || bit_length > 16 { return None; }
-    let last_bit = bit_offset + bit_length;
+    let last_bit = bit_offset.checked_add(bit_length)?;
     let needed_bytes = last_bit.div_ceil(8) as usize;
     if needed_bytes > payload.len() { return None; }
 
@@ -563,11 +563,10 @@ pub fn extract_value(payload: &[u8], field: &FieldSpec) -> Option<f32> {
     // is shifted by 24 bits to skip the 3-byte UDS positive-response header, so
     // bit_offset is header-relative exactly like byte_index in the byte branch.
     if let (Some(bit_off), Some(bit_len)) = (field.bit_offset, field.bit_length) {
-        return extract_bits(payload, bit_off + 24, bit_len)
+        return extract_bits(payload, bit_off.checked_add(24)?, bit_len)
             .map(|v| (v as f32) * field.multiplier + field.offset);
     }
 
-    // Byte branch (unchanged):
     let byte_index = field.byte_index?;
     let length     = field.length?;
     let idx = if byte_index < 0 {
@@ -576,9 +575,9 @@ pub fn extract_value(payload: &[u8], field: &FieldSpec) -> Option<f32> {
         positive as usize
     } else {
         // +3 skips the UDS positive-response header (e.g. 62 01 05).
-        (byte_index + 3) as usize
+        byte_index.checked_add(3)? as usize
     };
-    if idx + length > payload.len() { return None; }
+    if idx.checked_add(length)? > payload.len() { return None; }
 
     let raw = if field.signed.unwrap_or(false) {
         match length {
@@ -686,7 +685,7 @@ pub fn extract_value_broadcast(payload: &[u8], field: &FieldSpec) -> Option<f32>
     } else {
         bi as usize
     };
-    if idx + length > payload.len() { return None; }
+    if idx.checked_add(length)? > payload.len() { return None; }
     let raw = if field.signed.unwrap_or(false) {
         match length {
             1 => payload[idx] as i8 as f32,
@@ -880,6 +879,24 @@ mod tests {
             b"3: 12 13 14 15 16 17 18".to_vec(),
         ];
         assert_eq!(assemble_iso_tp(&lines).expect("payload").len(), 27);
+    }
+
+    #[test]
+    fn extract_value_overflowing_offsets_return_none() {
+        let p = vec![0u8; 8];
+        let mut f = FieldSpec {
+            name: "x".into(), byte_index: Some(i32::MAX - 1), length: Some(1),
+            bit_offset: None, bit_length: None,
+            multiplier: 1.0, offset: 0.0, signed: None,
+        };
+        assert_eq!(extract_value(&p, &f), None);
+        assert_eq!(extract_value_broadcast(&p, &f), None);
+        f.byte_index = None;
+        f.bit_offset = Some(u32::MAX);
+        f.bit_length = Some(8);
+        assert_eq!(extract_value(&p, &f), None);
+        assert_eq!(extract_value_broadcast(&p, &f), None);
+        assert_eq!(extract_bits(&p, u32::MAX, 8), None);
     }
 
     #[test]
