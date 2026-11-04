@@ -8,7 +8,7 @@ use log::{debug, trace};
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use std::io::ErrorKind;
+use std::io::{Error as IoError, ErrorKind};
 use tokio::io::AsyncReadExt;
 use tokio::time::timeout;
 
@@ -20,20 +20,45 @@ pub const DEFAULT_INIT: &[&str] = &[
 
 const EOM_PROMPT: u8 = b'>';
 const SEND_CMD_TIMEOUT: Duration = Duration::from_millis(5000);
+const RESYNC_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// One session owns one buffered reader for its whole life: bytes that arrive
+/// after a '>' prompt stay in the buffer for the next read instead of being
+/// dropped with a per-call reader. Writes pass through to the inner stream.
 pub struct Elm327Session<T> {
-    pub stream: T,
+    pub stream: BufReader<T>,
+    /// Set when a command timed out, so its late reply is still in flight.
+    /// The next `send_cmd` reads up to the prompt before writing.
+    out_of_sync: bool,
 }
 
 impl<T> Elm327Session<T>
 where
     T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-    pub fn new(stream: T) -> Self { Self { stream } }
+    pub fn new(stream: T) -> Self {
+        Self { stream: BufReader::new(stream), out_of_sync: false }
+    }
+
+    /// After a timed-out command its late reply is still in flight: read up to
+    /// the prompt before anything is written, and clear the flag only when the
+    /// prompt was found.
+    async fn resync(&mut self) -> Result<()> {
+        if self.out_of_sync {
+            if !self.read_until_prompt(RESYNC_TIMEOUT).await {
+                return Err(anyhow::Error::new(IoError::new(
+                    ErrorKind::TimedOut,
+                    "resync: no prompt after timed-out command",
+                )));
+            }
+            self.out_of_sync = false;
+        }
+        Ok(())
+    }
 
     /// Send a command, read until the '>' prompt, return the raw bytes.
     pub async fn send_cmd(&mut self, cmd: &str) -> Result<Vec<u8>> {
-        use std::io::{Error as IoError, ErrorKind};
+        self.resync().await?;
         let mut wire = Vec::with_capacity(cmd.len() + 1);
         wire.extend_from_slice(cmd.as_bytes());
         wire.push(b'\r');
@@ -44,11 +69,19 @@ where
         }
 
         let mut buf = Vec::new();
-        let mut reader = BufReader::new(&mut self.stream);
 
-        match timeout(SEND_CMD_TIMEOUT, reader.read_until(EOM_PROMPT, &mut buf)).await {
-            Ok(Ok(0)) => Err(anyhow::Error::new(IoError::other(format!("0 bytes for '{cmd}'")))),
+        match timeout(SEND_CMD_TIMEOUT, self.stream.read_until(EOM_PROMPT, &mut buf)).await {
+            Ok(Ok(0)) => Err(anyhow::Error::new(IoError::new(
+                ErrorKind::UnexpectedEof,
+                format!("0 bytes for '{cmd}'"),
+            ))),
+            Ok(Ok(_)) if buf.last() != Some(&EOM_PROMPT) => Err(anyhow::Error::new(IoError::new(
+                ErrorKind::UnexpectedEof,
+                format!("link closed mid-reply to '{cmd}'"),
+            ))),
             Ok(Ok(_)) => {
+                drop_nulls(&mut buf);
+                strip_echo(&mut buf, cmd);
                 let ascii = String::from_utf8_lossy(&buf);
                 trace!("Response ASCII: {ascii}");
                 if ascii.contains("NO DATA") {
@@ -60,15 +93,108 @@ where
                 Ok(buf)
             }
             Ok(Err(e)) => Err(anyhow::Error::new(IoError::new(e.kind(), format!("read '{cmd}': {e}")))),
-            Err(_) => Err(anyhow::Error::new(IoError::new(ErrorKind::TimedOut, format!("timeout '{cmd}'")))),
+            Err(_) => {
+                self.out_of_sync = true;
+                Err(anyhow::Error::new(IoError::new(ErrorKind::TimedOut, format!("timeout '{cmd}'"))))
+            }
         }
     }
 
-    /// Run a sequence of ELM327 init commands. Each failure is fatal.
+    /// Discard buffered and incoming bytes until none arrives for `quiet_ms`
+    /// or `max_ms` (capped at 2000) elapse, so a stale reply cannot be read as
+    /// the answer to the next command.
+    pub async fn drain_input(&mut self, quiet_ms: u64, max_ms: u64) {
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(max_ms.min(2000));
+        let quiet = Duration::from_millis(quiet_ms);
+        let pending = self.stream.buffer().len();
+        if pending > 0 {
+            self.stream.consume(pending);
+            trace!("drained {pending} buffered bytes");
+        }
+        loop {
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if left.is_zero() { break; }
+            let n = match timeout(quiet.min(left), self.stream.fill_buf()).await {
+                Ok(Ok(b)) => b.len(),
+                _ => break,
+            };
+            if n == 0 { break; }
+            self.stream.consume(n);
+            trace!("drained {n} bytes");
+        }
+    }
+
+    /// Read through the first '>' prompt, or until `max` elapses. Bytes after
+    /// the prompt stay buffered. Returns whether the prompt was found.
+    async fn read_until_prompt(&mut self, max: Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + max;
+        loop {
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if left.is_zero() { break; }
+            let (used, found) = match timeout(left, self.stream.fill_buf()).await {
+                Ok(Ok(b)) if !b.is_empty() => match b.iter().position(|c| *c == EOM_PROMPT) {
+                    Some(i) => (i + 1, true),
+                    None => (b.len(), false),
+                },
+                _ => break,
+            };
+            self.stream.consume(used);
+            if found { return true; }
+        }
+        false
+    }
+
+    /// Send ATE0 and require "OK". A missing reply or one without "OK" (the
+    /// chip drops input while it resets) is retried once after a drain.
+    async fn send_ate0(&mut self, cmd: &str) -> Result<()> {
+        let acked = |r: &Result<Vec<u8>>| {
+            r.as_ref().is_ok_and(|b| String::from_utf8_lossy(b).contains("OK"))
+        };
+        if acked(&self.send_cmd(cmd).await) {
+            return Ok(());
+        }
+        self.drain_input(200, 1000).await;
+        // The chip drops input while it resets, so the lost command has no
+        // reply to wait for; the drain above is the resync.
+        self.out_of_sync = false;
+        let retry = self.send_cmd(cmd).await;
+        if acked(&retry) {
+            return Ok(());
+        }
+        match retry {
+            Err(e) => Err(e.context(format!("init step '{cmd}' failed after retry"))),
+            Ok(_) => Err(anyhow!("init step '{cmd}' failed: no OK after retry")),
+        }
+    }
+
+    /// Run a sequence of ELM327 init commands. Each failure is fatal. Input
+    /// left over from the link probe or a previous session is discarded
+    /// first. After ATZ the reply must carry a banner (the chip is deaf while
+    /// it resets); a bare '?' prompt is a stale reply, so the next prompt is
+    /// awaited. ATE0 must be acknowledged, and is appended when the list has
+    /// none, since echo left on shifts every later reply.
     pub async fn run_init(&mut self, init: &[&str]) -> Result<()> {
+        self.drain_input(200, 1500).await;
         for cmd in init {
-            self.send_cmd(cmd).await
+            if cmd.trim().eq_ignore_ascii_case("ATE0") {
+                self.send_ate0(cmd).await?;
+                continue;
+            }
+            let reply = self.send_cmd(cmd).await
                 .with_context(|| format!("init step '{cmd}' failed"))?;
+            if cmd.trim().eq_ignore_ascii_case("ATZ") {
+                let no_banner = String::from_utf8_lossy(&reply)
+                    .replace(['?', '>'], "")
+                    .trim()
+                    .is_empty();
+                if no_banner {
+                    self.read_until_prompt(Duration::from_secs(3)).await;
+                }
+                self.drain_input(200, 1000).await;
+            }
+        }
+        if !init.iter().any(|c| c.trim().eq_ignore_ascii_case("ATE0")) {
+            self.send_ate0("ATE0").await?;
         }
         Ok(())
     }
@@ -103,11 +229,13 @@ where
         self.send_cmd("ATH0").await?;
 
         // Send the PID directly (then read lines rather than wait for a prompt).
+        self.resync().await?;
         let cmd = format!("{}\r", uds.pid);
         self.stream.write_all(cmd.as_bytes()).await
             .context("multiframe PID write")?;
 
         let mut lines: Vec<Vec<u8>> = Vec::new();
+        let mut saw_prompt = false;
 
         for _ in 0..25 {
             let line = match read_line_raw(&mut self.stream, 500).await {
@@ -119,8 +247,15 @@ where
                 }
             };
             let trimmed = String::from_utf8_lossy(&line).trim().to_string();
-            if trimmed.is_empty() || trimmed == ">" { break; }
+            if trimmed == ">" {
+                saw_prompt = true;
+                break;
+            }
+            if trimmed.is_empty() { break; }
             if trimmed.contains("NO DATA") || trimmed.contains("7F") {
+                // The line ended at its CR; consume the reply's prompt so
+                // ATH0 reads its own reply.
+                self.read_until_prompt(Duration::from_secs(2)).await;
                 let _ = self.send_cmd("ATH0").await;
                 return Err(anyhow!("UDS error response: {trimmed}"));
             }
@@ -129,6 +264,12 @@ where
             // serial link here would be read as typed input and interrupt
             // the request.
             lines.push(line);
+        }
+
+        // A read timeout or the line cap leaves the rest of the reply and its
+        // prompt unread; consume them so ATH0 reads its own reply.
+        if !saw_prompt {
+            self.read_until_prompt(Duration::from_secs(2)).await;
         }
 
         // Restore the headers-OFF baseline that single-frame get_payload
@@ -156,6 +297,7 @@ where
             let _ = self.send_cmd(cmd).await;
         }
         // ATMA streams continuously; do not wait for a '>' prompt.
+        self.resync().await?;
         self.stream.write_all(format!("{}\r", spec.command).as_bytes()).await
             .context("broadcast command write")?;
 
@@ -172,12 +314,17 @@ where
             .map(|f| f.can_id.clone())
             .collect();
         let mut seen_ids: HashSet<String> = HashSet::new();
+        let mut prompt_seen = false;
 
         while tokio::time::Instant::now() < deadline {
             match read_line_raw(&mut self.stream, 200).await {
                 Ok(b) => {
                     consecutive_timeouts = 0;
                     let ascii = String::from_utf8_lossy(&b).into_owned();
+                    if ascii.contains('>') {
+                        prompt_seen = true;
+                        break;
+                    }
                     if !ascii.trim().is_empty() {
                         if let Some(id) = ascii.split_whitespace().next() {
                             if id.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -198,16 +345,13 @@ where
             }
         }
 
-        // Stop ATMA cleanly: send a CR, then drain until the '>' prompt.
-        let _ = self.stream.write_all(b"\r").await;
-        let mut byte = [0u8; 1];
-        for _ in 0..200 {
-            match timeout(Duration::from_millis(50), self.stream.read(&mut byte)).await {
-                Ok(Ok(0)) => break,
-                Ok(Ok(_)) if byte[0] == b'>' => break,
-                Ok(Err(_)) | Err(_) => break,
-                _ => {}
-            }
+        // Stop ATMA cleanly: send a CR, then read until the '>' prompt. The
+        // ELM completes the line it is printing first, so the wait is bounded
+        // overall rather than per byte. When the ELM already left monitoring
+        // and printed its prompt, a CR would repeat the last command (ATMA).
+        if !prompt_seen {
+            let _ = self.stream.write_all(b"\r").await;
+            self.read_until_prompt(Duration::from_secs(2)).await;
         }
         let _ = self.send_cmd("ATCRA").await;
         // Restore headers OFF: the broadcast init turned headers ON for ATMA,
@@ -229,6 +373,29 @@ where
             }
         }
         Ok(metrics)
+    }
+}
+
+/// Remove NULL bytes, which the ELM327 may insert into its output.
+fn drop_nulls(buf: &mut Vec<u8>) {
+    buf.retain(|b| *b != 0);
+}
+
+/// Drop the first non-empty line of `buf` when it is the command just sent
+/// (echo on), comparing case-insensitively and ignoring spaces.
+fn strip_echo(buf: &mut Vec<u8>, cmd: &str) {
+    let norm = |b: &[u8]| -> String {
+        String::from_utf8_lossy(b).chars()
+            .filter(|c| !c.is_whitespace())
+            .collect::<String>()
+            .to_ascii_uppercase()
+    };
+    let Some(start) = buf.iter().position(|b| !matches!(b, b'\r' | b'\n')) else { return };
+    let end = buf[start..].iter()
+        .position(|b| matches!(b, b'\r' | b'\n'))
+        .map_or(buf.len(), |p| start + p);
+    if norm(&buf[start..end]) == norm(cmd.as_bytes()) {
+        buf.drain(..end);
     }
 }
 
@@ -537,6 +704,15 @@ mod tests {
         assert_eq!(p, vec![0x62, 0x01, 0x05, 0x11, 0x22, 0x33]);
     }
 
+    #[test]
+    fn drop_nulls_keeps_payload_decodable() {
+        let mut buf = b"62 20\0 06 02 15 04 \r\r>".to_vec();
+        drop_nulls(&mut buf);
+        assert!(!buf.contains(&0));
+        let p = get_payload(&String::from_utf8_lossy(&buf));
+        assert!(p.ends_with(&[0x02, 0x15, 0x04]), "{p:02X?}");
+    }
+
     // Motorola bit numbering: bit 0 = MSB of byte 0.
     //   byte 0 = 0xA5 = 1010_0101 — bits 0..7
     //   byte 1 = 0x3C = 0011_1100 — bits 8..15
@@ -629,6 +805,23 @@ mod tests {
         assert_eq!(frames["656"][1], vec![0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10]);
     }
 
+
+    #[tokio::test(start_paused = true)]
+    async fn send_cmd_reply_cut_off_before_the_prompt_is_eof() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (a, mut b) = tokio::io::duplex(256);
+        let mut session = Elm327Session::new(a);
+        tokio::spawn(async move {
+            let mut req = [0u8; 16];
+            let _ = b.read(&mut req).await.unwrap();
+            b.write_all(b"PARTIAL").await.unwrap();
+            drop(b);
+        });
+        let e = session.send_cmd("2201").await.unwrap_err();
+        let kind = e.downcast_ref::<std::io::Error>().map(std::io::Error::kind);
+        assert_eq!(kind, Some(ErrorKind::UnexpectedEof), "{e:#}");
+    }
+
     #[tokio::test]
     async fn session_send_cmd_reads_until_prompt() {
         let (a, mut b) = tokio::io::duplex(256);
@@ -644,6 +837,30 @@ mod tests {
 
         let resp = session.send_cmd("ATZ").await.unwrap();
         assert!(String::from_utf8_lossy(&resp).contains("ELM327"));
+        fixture.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn session_keeps_bytes_received_after_a_prompt() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (a, mut b) = tokio::io::duplex(256);
+        let mut session = Elm327Session::new(a);
+
+        let fixture = tokio::spawn(async move {
+            let mut req = [0u8; 16];
+            let n = b.read(&mut req).await.unwrap();
+            assert_eq!(&req[..n], b"ONE\r");
+            // Both replies arrive in one write.
+            b.write_all(b"A\r\r>B\r\r>").await.unwrap();
+            let n = b.read(&mut req).await.unwrap();
+            assert_eq!(&req[..n], b"TWO\r");
+            b
+        });
+
+        let first = session.send_cmd("ONE").await.unwrap();
+        assert!(String::from_utf8_lossy(&first).contains('A'));
+        let second = session.send_cmd("TWO").await.unwrap();
+        assert!(String::from_utf8_lossy(&second).contains('B'));
         fixture.await.unwrap();
     }
 }

@@ -211,6 +211,84 @@ fn kona_220105() -> Vector {
         .unwrap()
 }
 
+/// Connect sequence as BluetoothElm327Adapter::connect runs it: probe, then
+/// the default init, then one poll.
+async fn bt_connect_and_poll(cfg: EmuConfig) -> (Result<Metrics, String>, Vec<(String, bool)>) {
+    let v = kona_220105();
+    let (mut host, log) = emu::spawn(cfg, vec![ecu_for(&v)]);
+    super::bluetooth::probe_rfcomm_link(&mut host).await.unwrap();
+    let mut s = Elm327Session::new(host);
+    let res = match s.run_init(DEFAULT_INIT).await {
+        Err(e) => Err(format!("init: {e:#}")),
+        Ok(()) => {
+            let p = profile(&v.profile_file);
+            poll_source(&mut s, uds_source(&p, &v.pid)).await
+        }
+    };
+    let log = log.lock().unwrap().clone();
+    (res, log)
+}
+
+#[tokio::test(start_paused = true)]
+async fn bt_probe_and_init_with_slow_first_reply() {
+    // A clone whose first reply ('?' to the bare probe CR, no previous
+    // command) arrives after 600 ms, inside the probe's 2 s read, and whose ATZ
+    // reset takes 1 s.
+    let cfg = EmuConfig {
+        banner: "ELM327 v2.3".into(),
+        reset_ms: 1000,
+        first_reply_latency_ms: 600,
+        ..Default::default()
+    };
+    let (res, log) = bt_connect_and_poll(cfg).await;
+    let v = kona_220105();
+    let bad = compare(&v.id, &res, &v.expected);
+    assert!(bad.is_empty(), "{}\ncommands seen by adapter (text, acted on): {log:?}", bad.join("\n"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn init_survives_stale_prompt_in_buffer() {
+    let v = kona_220105();
+    let cfg = EmuConfig { reset_ms: 1000, stale_on_connect: b"?\r\r>".to_vec(), ..Default::default() };
+    let (host, log) = emu::spawn(cfg, vec![ecu_for(&v)]);
+    let mut s = Elm327Session::new(host);
+    s.run_init(DEFAULT_INIT).await.unwrap();
+    let p = profile(&v.profile_file);
+    let res = poll_source(&mut s, uds_source(&p, &v.pid)).await;
+    let bad = compare(&v.id, &res, &v.expected);
+    assert!(bad.is_empty(), "{}\nlog: {:?}", bad.join("\n"), log.lock().unwrap());
+}
+
+#[tokio::test(start_paused = true)]
+async fn send_cmd_strips_echoed_command_line() {
+    // send_cmd without run_init: echo stays on, so every reply starts with the
+    // command line the host just sent.
+    let v = kona_220105();
+    let (host, log) = emu::spawn(EmuConfig::default(), vec![ecu_for(&v)]);
+    let mut s = Elm327Session::new(host);
+    s.send_cmd("ATZ").await.unwrap();
+    let p = profile(&v.profile_file);
+    let res = poll_source(&mut s, uds_source(&p, &v.pid)).await;
+    let bad = compare(&v.id, &res, &v.expected);
+    assert!(bad.is_empty(), "{}\nlog: {:?}", bad.join("\n"), log.lock().unwrap());
+}
+
+#[tokio::test(start_paused = true)]
+async fn init_resends_ate0_when_unacknowledged() {
+    // The first ATE0 is lost; echo would stay on without the resend.
+    let v = kona_220105();
+    let cfg = EmuConfig { drop_first: Some("ATE0".into()), ..Default::default() };
+    let (host, log) = emu::spawn(cfg, vec![ecu_for(&v)]);
+    let mut s = Elm327Session::new(host);
+    s.run_init(DEFAULT_INIT).await.unwrap();
+    let p = profile(&v.profile_file);
+    let res = poll_source(&mut s, uds_source(&p, &v.pid)).await;
+    let log = log.lock().unwrap().clone();
+    let bad = compare(&v.id, &res, &v.expected);
+    assert!(bad.is_empty(), "{}\nlog: {log:?}", bad.join("\n"));
+    assert_eq!(log.iter().filter(|(c, _)| c == "ATE0").count(), 2, "log: {log:?}");
+}
+
 #[tokio::test(start_paused = true)]
 async fn atz_with_non_elm_banner_adds_no_wait() {
     let v = kona_220105();
@@ -225,6 +303,20 @@ async fn atz_with_non_elm_banner_adds_no_wait() {
     let res = poll_source(&mut s, uds_source(&p, &v.pid)).await;
     let bad = compare(&v.id, &res, &v.expected);
     assert!(bad.is_empty(), "{}", bad.join("\n"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn init_without_ate0_turns_echo_off() {
+    let v = kona_220105();
+    let (host, log) = emu::spawn(EmuConfig::default(), vec![ecu_for(&v)]);
+    let mut s = Elm327Session::new(host);
+    s.run_init(&["ATZ", "ATAL", "ATSP6"]).await.unwrap();
+    let p = profile(&v.profile_file);
+    let res = poll_source(&mut s, uds_source(&p, &v.pid)).await;
+    let log = log.lock().unwrap().clone();
+    let bad = compare(&v.id, &res, &v.expected);
+    assert!(bad.is_empty(), "{}\nlog: {log:?}", bad.join("\n"));
+    assert!(log.contains(&("ATE0".to_string(), true)), "log: {log:?}");
 }
 
 // ---- Multi-frame path (zoe 2174) -----------------------------------------
@@ -371,6 +463,43 @@ async fn multiframe_read_timeout_keeps_session_in_step() {
     }
 }
 
+/// A command whose reply arrives after SEND_CMD_TIMEOUT fails with TimedOut.
+/// The next command first reads up to the late reply's prompt, so it gets its
+/// own reply rather than the late one.
+#[tokio::test(start_paused = true)]
+async fn timed_out_command_does_not_shift_next_reply() {
+    let cfg = EmuConfig { slow_commands: vec![("ATH0".into(), 6000)], ..Default::default() };
+    let (host, _log) = emu::spawn(cfg, vec![]);
+    let mut s = Elm327Session::new(host);
+    let late = s.send_cmd("ATH0").await;
+    let kind = late.as_ref().err()
+        .and_then(|e| e.downcast_ref::<std::io::Error>())
+        .map(std::io::Error::kind);
+    assert_eq!(kind, Some(std::io::ErrorKind::TimedOut), "{late:?}");
+    let next = s.send_cmd("ATI").await.expect("ATI reply");
+    let text = String::from_utf8_lossy(&next).into_owned();
+    assert!(text.contains("ELM327") && !text.contains("OK"), "got {text:?}");
+}
+
+/// A reply later than the resync window (5 s timeout plus 2 s) is never read
+/// as the next command's answer: the session stays out of sync and refuses to
+/// send until a prompt is seen.
+#[tokio::test(start_paused = true)]
+async fn resync_without_prompt_fails_instead_of_shifting() {
+    let cfg = EmuConfig { slow_commands: vec![("ATH0".into(), 9000)], ..Default::default() };
+    let (host, log) = emu::spawn(cfg, vec![]);
+    let mut s = Elm327Session::new(host);
+    let first = s.send_cmd("ATH0").await;
+    assert!(first.is_err(), "{first:?}");
+    let next = s.send_cmd("ATI").await;
+    let kind = next.as_ref().err()
+        .and_then(|e| e.downcast_ref::<std::io::Error>())
+        .map(std::io::Error::kind);
+    assert_eq!(kind, Some(std::io::ErrorKind::TimedOut), "{next:?}");
+    let log = log.lock().unwrap().clone();
+    assert!(!log.iter().any(|(c, _)| c == "ATI"), "ATI was written\nlog: {log:?}");
+}
+
 // ---- Broadcast scan followed by polling ---------------------------------------
 
 /// The ELM answers the character that stops ATMA after a delay (it completes
@@ -408,6 +537,50 @@ async fn broadcast_then_poll_stays_in_sync() {
     bad.extend(compare("222002", &soc, &[("battery_level_percentage".to_string(), 51.96)].into()));
     bad.extend(compare("222006", &odo, &[("odometer_km".to_string(), 136452.0)].into()));
     let log = log.lock().unwrap().clone();
+    assert!(bad.is_empty(), "{}\nlog: {log:?}", bad.join("\n"));
+}
+
+/// When the ELM leaves monitoring by itself and prints its prompt, no stop
+/// character is sent: a lone CR would repeat ATMA, and the next command's first
+/// character would then be taken as the stop character.
+#[tokio::test(start_paused = true)]
+async fn broadcast_self_stop_skips_stop_cr() {
+    let ecus = vec![
+        Ecu::new(0x7E4, 0x7EC)
+            .respond_payload("10C0", "50 C0")
+            .respond_payload("222002", "62 20 02 0A 26")
+            .respond_payload("222006", "62 20 06 02 15 04"),
+    ];
+    let cfg = EmuConfig {
+        broadcast: vec![(0x1F6, vec![0x01; 8])],
+        reply_latency_ms: 40,
+        monitor_self_stop_after: Some(3),
+        ..Default::default()
+    };
+    let p = profile("zoe");
+    let init = profile_init(&p);
+    let (host, log) = emu::spawn(cfg, ecus);
+    let mut s = Elm327Session::new(host);
+    s.run_init(&init).await.unwrap();
+    let spec = p.sources.iter().find_map(|src| match src {
+        Source::Broadcast(b) => Some(b),
+        _ => None,
+    }).unwrap();
+    let t0 = tokio::time::Instant::now();
+    s.monitor_broadcast(spec).await.unwrap();
+    let elapsed = t0.elapsed();
+    let soc = poll_source(&mut s, uds_source(&p, "222002")).await;
+    let odo = poll_source(&mut s, uds_source(&p, "222006")).await;
+    let mut bad = compare("222002", &soc, &[("battery_level_percentage".to_string(), 51.96)].into());
+    bad.extend(compare("222006", &odo, &[("odometer_km".to_string(), 136452.0)].into()));
+    let log = log.lock().unwrap().clone();
+    let after_atma = log.iter().skip_while(|(c, _)| c != "ATMA").skip(1);
+    if after_atma.clone().any(|(c, acted)| c.is_empty() && *acted) {
+        bad.push("a bare CR was acted on after ATMA".to_string());
+    }
+    if elapsed >= Duration::from_secs(1) {
+        bad.push(format!("monitor_broadcast took {elapsed:?}"));
+    }
     assert!(bad.is_empty(), "{}\nlog: {log:?}", bad.join("\n"));
 }
 

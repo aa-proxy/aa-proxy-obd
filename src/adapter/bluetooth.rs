@@ -180,23 +180,54 @@ impl Adapter for BluetoothElm327Adapter {
     }
 }
 
-// Send a bare CR and drain whatever comes back. A live ELM327 echoes a fresh
-// '>' prompt; a dead peer fails the write immediately with HostDown/BrokenPipe
-// /NotConnected. Drain so the stale prompt doesn't shift the next send_cmd's
-// read by one response.
+// Send a bare CR and wait for the reply. A live ELM327 answers with a '>'
+// prompt (a lone CR repeats the last command; a freshly reset chip answers
+// '?'); a dead peer fails the write immediately with HostDown/BrokenPipe
+// /NotConnected, and a peer that closed the link reads as end-of-file. Read up
+// to the prompt, or 2 s, so a late reply is not left
+// in the stream to be taken as the answer to ATZ.
 pub(crate) async fn probe_rfcomm_link<S>(stream: &mut S) -> std::io::Result<()>
 where S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     timeout(Duration::from_secs(2), stream.write_all(b"\r")).await
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "probe write timed out"))??;
     let mut buf = [0u8; 256];
-    let _ = timeout(Duration::from_millis(500), stream.read(&mut buf)).await;
-    Ok(())
+    let read = timeout(Duration::from_secs(2), async {
+        loop {
+            let n = stream.read(&mut buf).await?;
+            if n == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "peer closed the link",
+                ));
+            }
+            if buf[..n].contains(&b'>') {
+                return Ok(());
+            }
+        }
+    }).await;
+    // No data within the window is not a failure; a read error or a closed
+    // peer is.
+    read.unwrap_or(Ok(()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::ErrorKind;
+    use tokio::io::AsyncReadExt;
+
+    #[tokio::test(start_paused = true)]
+    async fn probe_reports_a_peer_that_closed_the_link() {
+        let (mut host, mut peer) = tokio::io::duplex(64);
+        tokio::spawn(async move {
+            let mut cr = [0u8; 1];
+            peer.read_exact(&mut cr).await.unwrap();
+            drop(peer);
+        });
+        let err = probe_rfcomm_link(&mut host).await.expect_err("closed peer must fail the probe");
+        assert_eq!(err.kind(), ErrorKind::UnexpectedEof, "{err}");
+    }
 
     #[tokio::test(start_paused = true)]
     async fn probe_accepts_a_silent_peer() {
