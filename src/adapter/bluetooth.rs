@@ -184,10 +184,23 @@ impl Adapter for BluetoothElm327Adapter {
 // '>' prompt; a dead peer fails the write immediately with HostDown/BrokenPipe
 // /NotConnected. Drain so the stale prompt doesn't shift the next send_cmd's
 // read by one response.
-async fn probe_rfcomm_link(stream: &mut Stream) -> std::io::Result<()> {
+pub(crate) async fn probe_rfcomm_link<S>(stream: &mut S) -> std::io::Result<()>
+where S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     timeout(Duration::from_secs(2), stream.write_all(b"\r")).await
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "probe write timed out"))??;
     let mut buf = [0u8; 256];
     let _ = timeout(Duration::from_millis(500), stream.read(&mut buf)).await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn probe_accepts_a_silent_peer() {
+        let (mut host, _peer) = tokio::io::duplex(64);
+        probe_rfcomm_link(&mut host).await.expect("a read timeout is not a failure");
+    }
 }

@@ -11,6 +11,11 @@ pub mod pairing;
 pub mod usb;
 pub mod wican;
 
+#[cfg(test)]
+pub mod elm327_emu;
+#[cfg(test)]
+mod replay_tests;
+
 pub type Metrics = HashMap<String, f32>;
 
 /// What kind of error happened in poll/connect. The scheduler decides what
