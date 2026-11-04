@@ -24,6 +24,8 @@ A single Linux daemon that reads live EV telemetry (battery, odometer, tire pres
 | MG4             | `mg4`    | ✅ |    | ✅ |    |    |
 | Kia Niro        | `niro`   | ✅ |    |    |    |    |
 
+The `niro` profile is checked against OBDb recordings (model years 2019-2026), not on a car.
+
 The `ev6` and `ioniq5` profiles additionally report `battery_state_of_health`, `battery_voltage`, `battery_current` and `interior_temp_celsius`. Adding a new vehicle requires no Rust changes — see [Vehicle profiles](#vehicle-profiles).
 
 WiCAN Pro users get whatever their AutoPid configuration exposes (typically SOC plus outdoor temperature); the WiCAN firmware decodes PIDs itself, so the daemon does not load a `profiles/` file for `device.type = "wican"`.
