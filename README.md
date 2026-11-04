@@ -247,6 +247,8 @@ cargo build --release
 ```
 The vendored [`.cargo/config.toml`](.cargo/config.toml) defaults the target to `aarch64-unknown-linux-gnu` so the release build cross-compiles for common SBCs (e.g. Radxa Zero 3W running an [aa-proxy-rs](https://github.com/aa-proxy/aa-proxy-rs) image). Run the test suite on the host with `cargo test --target <host-triple>`.
 
+Every push to `main` runs [`.github/workflows/build.yml`](.github/workflows/build.yml): the tests on x86_64 Linux, then the aarch64 release build, uploaded as the `aa-proxy-obd-aarch64-unknown-linux-gnu` artifact of the run. The workflow can also be started by hand from the Actions tab.
+
 ## License
 GPL-2.0-only. See [`LICENSE`](LICENSE).
 

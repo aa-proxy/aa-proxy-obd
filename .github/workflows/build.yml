@@ -1,0 +1,41 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # .cargo/config.toml links aarch64 binaries with aarch64-linux-gnu-gcc, and the
+      # vendored libdbus is compiled with the same C toolchain.
+      - name: Install the aarch64 cross toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu,x86_64-unknown-linux-gnu
+
+      - uses: Swatinem/rust-cache@v2
+
+      # The default target is aarch64, so the tests name the runner's own target.
+      - name: Test
+        run: cargo test --locked --target x86_64-unknown-linux-gnu
+
+      - name: Build for aarch64
+        run: cargo build --locked --release --target aarch64-unknown-linux-gnu
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aa-proxy-obd-aarch64-unknown-linux-gnu
+          path: target/aarch64-unknown-linux-gnu/release/aa-proxy-obd
+          if-no-files-found: error
