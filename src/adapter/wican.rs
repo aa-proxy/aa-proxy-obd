@@ -24,6 +24,17 @@ struct WicanResponse {
     #[serde(alias = "TMP_A")] outdoor_temperature: Option<f32>,
 }
 
+/// BlueZ reports a stale or mismatched bond as a failed or rejected
+/// authentication; removing the device then lets the next connect pair from
+/// scratch. Timeout and cancel can happen with a valid key (slow or busy
+/// device), so they keep the bond.
+fn is_auth_failure(e: &bluer::Error) -> bool {
+    matches!(
+        e.kind,
+        bluer::ErrorKind::AuthenticationFailed | bluer::ErrorKind::AuthenticationRejected
+    )
+}
+
 pub struct WicanAdapter {
     mac: Address,
     passkey: Option<u32>,
@@ -74,7 +85,23 @@ impl WicanAdapter {
             let session = self.session.as_ref().context("session missing")?;
             self._agent_handle = Some(register_passkey_agent(session, pk, self.mac).await?);
         }
-        device.pair().await.context("pair failed")
+        match device.pair().await {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                self.drop_bond_on_auth_failure(device, &e).await;
+                Err(anyhow::Error::new(e).context("pair failed"))
+            }
+        }
+    }
+
+    async fn drop_bond_on_auth_failure(&self, device: &Device, e: &bluer::Error) {
+        if !is_auth_failure(e) { return; }
+        warn!("WiCAN authentication failed ({e}); removing the device so the next connect pairs again");
+        if let Some(a) = &self.adapter {
+            if let Err(re) = a.remove_device(device.address()).await {
+                warn!("WiCAN device removal failed: {re}");
+            }
+        }
     }
 
     async fn try_connect(&self, device: &Device) -> anyhow::Result<()> {
@@ -82,12 +109,15 @@ impl WicanAdapter {
         for attempt in 0..self.max_retries {
             match device.connect().await {
                 Ok(_) => { info!("WiCAN connected"); return Ok(()); }
+                Err(e) if is_auth_failure(&e) => {
+                    self.drop_bond_on_auth_failure(device, &e).await;
+                    return Err(anyhow!("WiCAN connect rejected: {e}"));
+                }
                 Err(e) if attempt + 1 < self.max_retries => {
                     warn!("WiCAN connect attempt {}/{} failed: {e}", attempt + 1, self.max_retries);
                     time::sleep(Duration::from_secs(10)).await;
                 }
                 Err(e) => {
-                    if let Some(a) = &self.adapter { let _ = a.remove_device(device.address()).await; }
                     return Err(anyhow!("WiCAN connect exhausted retries: {e}"));
                 }
             }
@@ -200,5 +230,22 @@ impl Adapter for WicanAdapter {
 
     fn connect_bound(&self) -> Duration {
         super::wican_connect_bound(self.max_retries, self.timeout_secs)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_authentication_errors_drop_the_bond() {
+        use bluer::{Error, ErrorKind};
+        let mk = |kind| Error { kind, message: String::new() };
+        assert!(is_auth_failure(&mk(ErrorKind::AuthenticationFailed)));
+        assert!(is_auth_failure(&mk(ErrorKind::AuthenticationRejected)));
+        assert!(!is_auth_failure(&mk(ErrorKind::AuthenticationTimeout)));
+        assert!(!is_auth_failure(&mk(ErrorKind::AuthenticationCanceled)));
+        assert!(!is_auth_failure(&mk(ErrorKind::Failed)));
+        assert!(!is_auth_failure(&mk(ErrorKind::InProgress)));
     }
 }
