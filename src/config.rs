@@ -66,6 +66,10 @@ pub struct DaemonSection {
     pub publish_breaker_secs: u64,
     #[serde(default = "default_cycle_failure_limit")]
     pub cycle_failure_limit: u32,
+    /// Topic for POST /raw-topic-data. When set, each poll cycle sends all of its
+    /// metrics there as one JSON object; when unset, nothing is sent.
+    #[serde(default)]
+    pub raw_topic: Option<String>,
 }
 
 fn default_poll_interval_secs()        -> f32    { 10.0 }
@@ -90,6 +94,7 @@ impl Default for DaemonSection {
             publish_failure_threshold: default_publish_failure_threshold(),
             publish_breaker_secs:      default_publish_breaker_secs(),
             cycle_failure_limit:       default_cycle_failure_limit(),
+            raw_topic:                 None,
         }
     }
 }
@@ -105,6 +110,7 @@ pub struct Config {
 
 const PLACEHOLDER_MAC: &str = "AA:BB:CC:DD:EE:FF";
 const MIN_INTERVAL_SECS: f32 = 0.1;
+const MAX_RAW_TOPIC_CHARS: usize = 64;
 
 const DEVICE_KEYS: &[&str] = &[
     "type", "bt_mac", "bt_passkey", "bt_max_connect_retries", "bt_timeout_secs",
@@ -114,7 +120,7 @@ const VEHICLE_KEYS: &[&str] = &["profile", "battery_capacity_wh"];
 const DAEMON_KEYS: &[&str] = &[
     "poll_interval_secs", "car_sleep_interval_secs", "log_level", "log_file",
     "api_base_url", "bridge_dropouts", "publish_failure_threshold",
-    "publish_breaker_secs", "cycle_failure_limit",
+    "publish_breaker_secs", "cycle_failure_limit", "raw_topic",
 ];
 
 fn invalid(msg: String) -> Error {
@@ -203,6 +209,16 @@ impl Config {
         let d = &self.daemon;
         check_interval("poll_interval_secs", d.poll_interval_secs)?;
         check_interval("car_sleep_interval_secs", d.car_sleep_interval_secs)?;
+        if let Some(topic) = &d.raw_topic {
+            let ok = !topic.is_empty()
+                && topic.len() <= MAX_RAW_TOPIC_CHARS
+                && topic.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+            if !ok {
+                return Err(invalid(format!(
+                    "daemon.raw_topic must be 1 to {MAX_RAW_TOPIC_CHARS} characters of A-Z, a-z, 0-9, '_' or '-', got '{topic}'"
+                )));
+            }
+        }
         if self.device.usb_baud == Some(0) {
             return Err(invalid("device.usb_baud must be >= 1".into()));
         }
@@ -377,7 +393,7 @@ mod tests {
                 usb_baud: Some(1),
             },
             vehicle: VehicleSection { profile: Some("p".into()), battery_capacity_wh: Some(1) },
-            daemon: DaemonSection::default(),
+            daemon: DaemonSection { raw_topic: Some("obd".into()), ..DaemonSection::default() },
         };
         let value = toml::Value::try_from(&cfg).unwrap();
         for (section, known) in [("device", DEVICE_KEYS), ("vehicle", VEHICLE_KEYS), ("daemon", DAEMON_KEYS)] {
@@ -390,6 +406,19 @@ mod tests {
         }
         assert_eq!(value.as_table().unwrap().len(), 3);
         assert!(unknown_keys(&value).is_empty());
+    }
+
+    #[test]
+    fn raw_topic_accepts_a_plain_name_only() {
+        let with = |topic: &str| format!(
+            "[device]\ntype = \"usb\"\nusb_port = \"/dev/ttyUSB0\"\n[daemon]\nraw_topic = \"{topic}\"\n"
+        );
+        let (cfg, _) = Config::parse(&with("obd_golf-7"), Path::new("t")).unwrap();
+        assert_eq!(cfg.daemon.raw_topic.as_deref(), Some("obd_golf-7"));
+        for bad in ["", "obd.rpm", "has space", &"x".repeat(65)] {
+            let e = Config::parse(&with(bad), Path::new("t")).unwrap_err();
+            assert!(e.to_string().contains("daemon.raw_topic"), "{bad}: {e}");
+        }
     }
 
     #[test]

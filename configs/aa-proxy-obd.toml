@@ -25,11 +25,13 @@
 # publish_failure_threshold = 5
 # publish_breaker_secs      = 300
 # cycle_failure_limit       = 20
+# raw_topic                 = "obd"                      # optional; also send every metric to /raw-topic-data
 #
 # Notes:
 # - battery_capacity_wh enables derived battery_level_wh.
 # - bt_passkey enables automatic pairing.
 # - profile is ignored when device.type = "wican".
+# - raw_topic makes every metric available to the aa-proxy-rs overlay as {{ws.<raw_topic>.<field>}}.
 
 [device]
 type                      = "bluetooth"                # bluetooth | usb | wican

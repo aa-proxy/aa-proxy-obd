@@ -34,17 +34,23 @@ The `ev6`, `ioniq5` and `kona` profiles additionally report `battery_state_of_he
 WiCAN Pro users get whatever their AutoPid configuration exposes (typically SOC plus outdoor temperature); the WiCAN firmware decodes PIDs itself, so the daemon does not load a `profiles/` file for `device.type = "wican"`.
 
 ## What it transmits
-While the adapter is reachable and the car is awake, the daemon polls and `POST`s JSON to three endpoints on `localhost`. For each endpoint, it sends only if at least one relevant field was produced this cycle (absent fields are omitted); otherwise the endpoint is silently skipped.
+While the adapter is reachable and the car is awake, the daemon polls and `POST`s JSON to three endpoints on `localhost`, plus `/raw-topic-data` when `raw_topic` is set. For each endpoint, it sends only if at least one relevant field was produced this cycle (absent fields are omitted); otherwise the endpoint is silently skipped.
 
 | Endpoint | Payload |
 |---|---|
 | `POST {api_base_url}/battery` | `battery_level_percentage`, `battery_level_wh`, `battery_capacity_wh`, `external_temp_celsius`, `battery_state_of_health`, `battery_voltage`, `battery_current`, `interior_temp_celsius` (all optional; sent only with `battery_level_percentage` or a Wh value, because aa-proxy-rs rejects a battery payload without either) |
 | `POST {api_base_url}/odometer` | `odometer_km`, `trip_km` (optional) |
 | `POST {api_base_url}/tire-pressure` | `pressures_kpa[]` (FL, FR, RL, RR; sent only when `tire_fl_kpa` was read, missing positions are `0`) |
+| `POST {api_base_url}/raw-topic-data` | `{"topic": "<raw_topic>", "payload": "<JSON object of every metric read this cycle>"}`; only when `daemon.raw_topic` is set |
 
 If the active profile reports SOC as a percentage and `battery_capacity_wh` is set in config, the daemon derives `battery_level_wh = SOC × capacity / 100` automatically when the profile doesn't report Wh directly.
 
 [aa-proxy-rs](https://github.com/aa-proxy/aa-proxy-rs) currently consumes `battery_level_percentage`, `battery_level_wh`, `battery_capacity_wh` and `external_temp_celsius` from the battery payload; the remaining battery fields are accepted and ignored. It rejects a battery payload with neither percentage nor Wh, a percentage outside 0–100, a negative `odometer_km`, or a `pressures_kpa` list that is empty or longer than four.
+
+### Overlay data (`raw_topic`)
+With `raw_topic = "obd"` under `[daemon]`, every poll cycle also sends all metrics the profile read, under their profile field names, to aa-proxy-rs's `POST /raw-topic-data`, for example `{"topic":"obd","payload":"{\"coolant_temp_c\":88.0,\"rpm\":766.5}"}`. aa-proxy-rs keeps the latest payload per topic, and its overlay text can show a value with a placeholder such as `{{ws.obd.rpm:0}}` or `{{ws.obd.coolant_temp_c:0 | --}}` (see the aa-proxy-rs README, "Live data templates"). This works for any field name, so a profile can read values that have no aa-proxy-rs endpoint of their own, such as rpm or coolant temperature.
+
+The overlay value is as fresh as the last poll cycle, so lower `poll_interval_secs` for fast-changing values. Payloads are not replayed when a cycle produces no data, and a payload over 4096 bytes, which aa-proxy-rs ignores, is not sent. aa-proxy-rs versions without the endpoint answer 404, which is logged as a publish failure, so leave `raw_topic` unset there.
 
 ## Usage
 ```
@@ -121,11 +127,13 @@ bridge_dropouts           = true
 publish_failure_threshold = 5
 publish_breaker_secs      = 300
 cycle_failure_limit       = 20
+# raw_topic               = "obd"                      # optional; also send every metric to /raw-topic-data
 ```
 
 The `wican` device type connects over Bluetooth, so it shares the `bt_*` options (`bt_mac`, `bt_passkey`, `bt_max_connect_retries`, `bt_timeout_secs`). Keys under `[device]` that don't apply to the selected `type` are ignored. `poll_interval_secs` and `car_sleep_interval_secs` accept fractional values. `log_level` values other than those listed fall back to `info`. A warning names the rejected value.
 
 The config is validated at load and a failure exits with code 1 and a message naming the key. `poll_interval_secs` and `car_sleep_interval_secs` must be finite and at least 0.1; `usb_baud` must be at least 1; `bt_mac` must not be the placeholder `AA:BB:CC:DD:EE:FF` shown in the examples above, so set it to the adapter's MAC. Unknown keys (for example a misspelled `poll_intervall_secs`) are logged as warnings and ignored.
+`raw_topic`, when set, must be 1 to 64 characters of letters, digits, `_` or `-`.
 
 Profiles are validated the same way when loaded: `vehicle.profile` may contain only `a-z`, `0-9`, `_`, `-` and `.` (no `..` or path separators), ECU IDs must be 3, 6 or 8 hex digits, PIDs hex with an even length, and each field needs a complete `byte_index`+`length` pair (length 1 to 3, or 1 to 2 in broadcast frames) or `bit_offset`+`bit_length` pair (length 1 to 16); when both are set the bit pair is used. Broadcast sources need `deadline_ms` > 0, with `can_id` of 3 or 8 hex digits.
 

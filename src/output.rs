@@ -5,6 +5,7 @@ use crate::adapter::Metrics;
 use log::warn;
 use reqwest::Client;
 use serde::Serialize;
+use std::collections::BTreeMap;
 use std::time::Duration;
 use tokio::time::Instant;
 
@@ -66,6 +67,17 @@ pub struct OdometerData {
 pub struct TirePressureData {
     pub pressures_kpa: Vec<f32>,
 }
+
+/// Body of aa-proxy-rs's POST /raw-topic-data: `payload` is JSON text, which
+/// aa-proxy-rs forwards to its websocket bus as the latest value of `topic`.
+#[derive(Debug, Serialize, Clone, PartialEq)]
+pub struct RawTopicData {
+    pub topic: String,
+    pub payload: String,
+}
+
+/// aa-proxy-rs ignores raw-topic payloads larger than this.
+const MAX_RAW_PAYLOAD_BYTES: usize = 4096;
 
 /// Shortest replay limit: a cached payload is replayed only while it is no older than
 /// max(this, 2 x poll interval).
@@ -136,12 +148,14 @@ pub struct Publisher {
     cache: tokio::sync::Mutex<PublishCache>,
     bridge_dropouts: bool,
     replay_limit: Duration,
+    raw_topic: Option<String>,
 }
 
 struct Breakers {
     battery:       CircuitBreaker,
     odometer:      CircuitBreaker,
     tire_pressure: CircuitBreaker,
+    raw_topic:     CircuitBreaker,
 }
 
 impl Publisher {
@@ -178,11 +192,20 @@ impl Publisher {
                 battery:       CircuitBreaker::new(threshold, dur),
                 odometer:      CircuitBreaker::new(threshold, dur),
                 tire_pressure: CircuitBreaker::new(threshold, dur),
+                raw_topic:     CircuitBreaker::new(threshold, dur),
             }),
             cache: tokio::sync::Mutex::new(PublishCache::default()),
             bridge_dropouts,
             replay_limit: MIN_REPLAY_AGE,
+            raw_topic: None,
         })
+    }
+
+    /// Sends every poll cycle's metrics to POST /raw-topic-data under `topic`;
+    /// `None` sends nothing there.
+    pub fn with_raw_topic(mut self, topic: Option<String>) -> Self {
+        self.raw_topic = topic;
+        self
     }
 
     /// Sets the replay limit to max(`MIN_REPLAY_AGE`, 2 x `poll_interval`), so a
@@ -243,7 +266,26 @@ impl Publisher {
         })
     }
 
-    /// Publish all three endpoints. Returns true if at least one POST succeeded.
+    /// All finite metrics of one cycle as a JSON object with sorted keys, under
+    /// the configured topic. None without a topic, without data, or when the
+    /// payload exceeds what aa-proxy-rs accepts.
+    pub fn build_raw_topic(&self, m: &Metrics) -> Option<RawTopicData> {
+        let topic = self.raw_topic.as_ref()?;
+        let values: BTreeMap<&str, f32> = m.iter()
+            .filter(|(_, v)| v.is_finite())
+            .map(|(k, &v)| (k.as_str(), v))
+            .collect();
+        if values.is_empty() { return None; }
+        let payload = serde_json::to_string(&values).ok()?;
+        if payload.len() > MAX_RAW_PAYLOAD_BYTES {
+            warn!("raw topic payload is {} bytes, over the {MAX_RAW_PAYLOAD_BYTES}-byte limit; not sent",
+                payload.len());
+            return None;
+        }
+        Some(RawTopicData { topic: topic.clone(), payload })
+    }
+
+    /// Publish every endpoint that has data. Returns true if at least one POST succeeded.
     pub async fn publish(&self, m: &Metrics) -> bool {
         let mut any_ok = false;
 
@@ -289,6 +331,13 @@ impl Publisher {
             }
         }
 
+        // Not replayed from the cache: overlay values must reflect this cycle.
+        if let Some(r) = self.build_raw_topic(m) {
+            if self.attempt_raw_topic(&r).await {
+                any_ok = true;
+            }
+        }
+
         any_ok
     }
 
@@ -313,6 +362,14 @@ impl Publisher {
         let ok = self.post(&format!("{}/tire-pressure", self.api_base), t).await;
         let mut br = self.breakers.lock().await;
         if ok { br.tire_pressure.record_success(); } else { br.tire_pressure.record_failure(); }
+        ok
+    }
+
+    async fn attempt_raw_topic(&self, r: &RawTopicData) -> bool {
+        if !self.breakers.lock().await.raw_topic.allow() { return false; }
+        let ok = self.post(&format!("{}/raw-topic-data", self.api_base), r).await;
+        let mut br = self.breakers.lock().await;
+        if ok { br.raw_topic.record_success(); } else { br.raw_topic.record_failure(); }
         ok
     }
 
@@ -423,6 +480,38 @@ mod tests {
         let m = metrics_with(&[("tire_fl_kpa", 220.0), ("tire_rr_kpa", 210.0)]);
         let d = p.build_tire_pressure(&m).unwrap();
         assert_eq!(d.pressures_kpa, vec![220.0, 0.0, 0.0, 210.0]);
+    }
+
+    #[test]
+    fn build_raw_topic_sends_every_finite_metric_under_the_topic() {
+        let p = Publisher::new("http://x", None, 5, 300, false).unwrap();
+        let m = metrics_with(&[("rpm", 766.5), ("coolant_temp_c", 88.0), ("bad", f32::NAN)]);
+        assert_eq!(p.build_raw_topic(&m), None, "no topic configured");
+
+        let p = p.with_raw_topic(Some("obd".into()));
+        assert_eq!(p.build_raw_topic(&m), Some(RawTopicData {
+            topic: "obd".into(),
+            payload: r#"{"coolant_temp_c":88.0,"rpm":766.5}"#.into(),
+        }));
+        assert_eq!(p.build_raw_topic(&Metrics::new()), None, "no data");
+
+        let many: Metrics = (0..400).map(|i| (format!("metric_{i:04}"), 1.0)).collect();
+        assert_eq!(p.build_raw_topic(&many), None, "payload over the aa-proxy-rs limit");
+    }
+
+    #[tokio::test]
+    async fn publish_posts_metrics_to_raw_topic_data() {
+        use wiremock::{matchers::{body_json, method, path}, Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/raw-topic-data"))
+            .and(body_json(serde_json::json!({"topic": "obd", "payload": "{\"rpm\":766.5}"})))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server).await;
+
+        let p = Publisher::new(server.uri(), None, 5, 300, true).unwrap()
+            .with_raw_topic(Some("obd".into()));
+        assert!(p.publish(&metrics_with(&[("rpm", 766.5)])).await);
     }
 
     #[tokio::test]

@@ -116,7 +116,8 @@ async fn main() -> anyhow::Result<()> {
         cfg.daemon.bridge_dropouts,
     )
     .context("build HTTP publisher")?
-    .with_poll_interval(std::time::Duration::from_secs_f32(cfg.daemon.poll_interval_secs));
+    .with_poll_interval(std::time::Duration::from_secs_f32(cfg.daemon.poll_interval_secs))
+    .with_raw_topic(cfg.daemon.raw_topic.clone());
 
     let shutdown = Arc::new(scheduler::Shutdown::new());
     {
