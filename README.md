@@ -38,7 +38,7 @@ While the adapter is reachable and the car is awake, the daemon polls and `POST`
 
 | Endpoint | Payload |
 |---|---|
-| `POST {api_base_url}/battery` | `battery_level_percentage`, `battery_level_wh`, `battery_capacity_wh`, `external_temp_celsius`, `battery_state_of_health`, `battery_voltage`, `battery_current`, `interior_temp_celsius` (all optional) |
+| `POST {api_base_url}/battery` | `battery_level_percentage`, `battery_level_wh`, `battery_capacity_wh`, `external_temp_celsius`, `battery_state_of_health`, `battery_voltage`, `battery_current`, `interior_temp_celsius` (all optional; sent only with `battery_level_percentage` or a Wh value, because aa-proxy-rs rejects a battery payload without either) |
 | `POST {api_base_url}/odometer` | `odometer_km`, `trip_km` (optional) |
 | `POST {api_base_url}/tire-pressure` | `pressures_kpa[]` (FL, FR, RL, RR; sent only when `tire_fl_kpa` was read, missing positions are `0`) |
 

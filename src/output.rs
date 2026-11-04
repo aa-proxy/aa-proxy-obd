@@ -115,6 +115,19 @@ impl PublishCache {
     pub fn clear(&mut self) { *self = PublishCache::default(); }
 }
 
+/// Converts a sensor value to an integer; non-finite and negative values yield None.
+fn sensor_to_u64(v: f32) -> Option<u64> {
+    if v.is_finite() && v >= 0.0 { Some(v as u64) } else { None }
+}
+
+/// State of charge (percent) of capacity (Wh); None unless both are finite and non-negative.
+fn derive_level_wh(pct: f32, capacity_wh: f32) -> Option<u64> {
+    if !pct.is_finite() || pct < 0.0 || !capacity_wh.is_finite() || capacity_wh < 0.0 {
+        return None;
+    }
+    sensor_to_u64((pct / 100.0) * capacity_wh)
+}
+
 pub struct Publisher {
     client: Client,
     api_base: String,
@@ -189,11 +202,15 @@ impl Publisher {
             "battery_state_of_health","battery_voltage","battery_current","interior_temp_celsius"];
         if !relevant.iter().any(|k| m.contains_key(*k)) { return None; }
 
-        let derived_level_wh = match (m.get("battery_level_wh"), m.get("battery_level_percentage"), self.capacity_wh) {
-            (Some(&v), _, _)             => Some(v as u64),
-            (None, Some(&pct), Some(c))  => Some(((pct / 100.0) * c as f32) as u64),
-            _                            => None,
-        };
+        let explicit_wh = m.get("battery_level_wh").and_then(|&v| sensor_to_u64(v));
+        let derived_level_wh = explicit_wh.or_else(|| match (m.get("battery_level_percentage"), self.capacity_wh) {
+            (Some(&pct), Some(c)) => derive_level_wh(pct, c as f32),
+            _                     => None,
+        });
+        // aa-proxy-rs rejects a battery payload with neither a percentage nor Wh.
+        if !m.contains_key("battery_level_percentage") && derived_level_wh.is_none() {
+            return None;
+        }
 
         Some(BatteryData {
             battery_level_percentage: m.get("battery_level_percentage").copied(),
@@ -379,6 +396,16 @@ mod tests {
     }
 
     #[test]
+    fn build_battery_needs_a_percentage_or_wh() {
+        let p = Publisher::new("http://x", Some(80000), 5, 300, false).unwrap();
+        assert!(p.build_battery(&metrics_with(&[("external_temp_celsius", 12.0)])).is_none());
+        let d = p.build_battery(&metrics_with(&[("external_temp_celsius", 12.0), ("battery_level_percentage", 50.0)]))
+            .expect("percentage present");
+        assert_eq!(d.external_temp_celsius, Some(12.0));
+        assert!(p.build_battery(&metrics_with(&[("battery_level_wh", 30000.0)])).is_some());
+    }
+
+    #[test]
     fn build_odometer_present_only_when_field_present() {
         let p = Publisher::new("http://test", None, 5, 300, true).unwrap();
         assert!(p.build_odometer(&Metrics::new()).is_none());
@@ -519,6 +546,21 @@ mod tests {
         assert!(p.publish(&Metrics::new()).await, "1000 s old payload is replayed at a 900 s poll");
         backdate_battery(&p, Duration::from_secs(1801)).await;
         assert!(!p.publish(&Metrics::new()).await, "1801 s old payload is not replayed");
+    }
+
+    #[test]
+    fn invalid_soc_or_capacity_yields_no_derived_wh() {
+        let p = Publisher::new("http://test", Some(80000), 5, 300, true).unwrap();
+        for bad in [f32::NAN, f32::INFINITY, -1.0] {
+            let d = p.build_battery(&metrics_with(&[("battery_level_percentage", bad)])).unwrap();
+            assert_eq!(d.battery_level_wh, None, "soc {bad}");
+            assert!(p.build_battery(&metrics_with(&[("battery_level_wh", bad)])).is_none(), "explicit wh {bad} alone");
+        }
+        let d = p.build_battery(&metrics_with(&[("battery_level_wh", f32::NAN), ("battery_level_percentage", 50.0)])).unwrap();
+        assert_eq!(d.battery_level_wh, Some(40000), "invalid explicit wh falls back to the SoC-derived value");
+        assert_eq!(derive_level_wh(50.0, -80000.0), None);
+        assert_eq!(derive_level_wh(50.0, f32::NAN), None);
+        assert_eq!(derive_level_wh(50.0, 80000.0), Some(40000));
     }
 
     #[tokio::test]
