@@ -58,6 +58,21 @@
     },
     {
       "kind": "uds_pid",
+      "ecu_tx": "744",
+      "ecu_rx": "74C",
+      "pid": "22E001",
+      "fields": [
+        {"name": "dc_charging", "bit_offset": 140, "bit_length": 1},
+        {"name": "ac_charging", "bit_offset": 141, "bit_length": 1},
+        {"name": "obc_dc_voltage", "byte_index": 19, "length": 2, "multiplier": 0.1, "offset": 0.0, "enabled": false},
+        {"name": "obc_dc_current", "byte_index": 21, "length": 2, "multiplier": 0.1, "offset": 0.0, "enabled": false},
+        {"name": "obc_ac_current", "byte_index": 23, "length": 2, "multiplier": 0.1, "offset": 0.0, "enabled": false},
+        {"name": "obc_ac_voltage", "byte_index": 25, "length": 1, "multiplier": 1.0, "offset": 0.0, "enabled": false},
+        {"name": "charge_power_estimate", "byte_index": 28, "length": 2, "multiplier": 10.0, "offset": -50.0, "enabled": false},
+        {"name": "aux_battery_voltage_precise", "byte_index": 11, "length": 2, "multiplier": 0.01, "offset": 0.0, "enabled": false}
+      ]
+    },    {
+      "kind": "uds_pid",
       "ecu_tx": "7A0",
       "ecu_rx": "7A8",
       "pid": "22C00B",

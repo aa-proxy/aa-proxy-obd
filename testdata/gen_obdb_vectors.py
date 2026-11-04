@@ -28,7 +28,11 @@ MAP = {
   'HVBAT_INLET_T': ('battery_inlet_temp_celsius', 1), 'VPWR': ('aux_battery_voltage', 1),
   'RPM_2': ('motor_rpm', 1), 'ISO_R': ('isolation_resistance_kohm', 1), 'VSS_7B3': ('speed_kmh', 1),
   'HVBAT_CHG_P_AVAIL': ('charge_power_available_kw', 1), 'HVBAT_DCHG_P_AVAIL': ('discharge_power_available_kw', 1),  # SAE J1979 mode 01 signal names
-  'RPM': ('rpm', 1), 'VSS': ('speed_kmh', 1), 'ECT': ('coolant_temp_c', 1),
+  # 744 22E001 charger state (Hyundai/Kia)
+  'DC_CHRG_STATE': ('dc_charging', 1), 'AC_CHRG_STATE': ('ac_charging', 1),
+  'OBC_CHRG_DC_VOLTAGE': ('obc_dc_voltage', 1), 'OBC_CHRG_DC_CURRENT': ('obc_dc_current', 1),
+  'OBC_CHRG_AC_CURRENT': ('obc_ac_current', 1), 'OBC_CHRG_AC_VOLTAGE': ('obc_ac_voltage', 1),
+  'ESTIMATED_CHRG_POWER': ('charge_power_estimate', 1), 'AUX_BATTERY_VOLTAGE': ('aux_battery_voltage_precise', 1),  'RPM': ('rpm', 1), 'VSS': ('speed_kmh', 1), 'ECT': ('coolant_temp_c', 1),
   'AAT': ('external_temp_celsius', 1), 'FLI': ('fuel_level_pct', 1),
 }
 # (vector id prefix, profile, OBDb repository, model years replayed or None for all)
