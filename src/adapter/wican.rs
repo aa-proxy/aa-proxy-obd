@@ -12,7 +12,7 @@ use futures_util::StreamExt;
 use log::{debug, info, warn};
 use serde::Deserialize;
 use std::time::Duration;
-use tokio::time::{self, timeout};
+use tokio::time::{self, timeout, Instant};
 
 const WICAN_NOTIFY_UUID: Uuid = Uuid::from_u128(0x0200dec0_01ef_bc9a_5678_1234deadf0be);
 const WICAN_WRITE_UUID:  Uuid = Uuid::from_u128(0x0300dec0_01ef_bc9a_5678_1234deadf0be);
@@ -22,6 +22,100 @@ struct WicanResponse {
     #[serde(alias = "SOC")]   soc:   f32,
     #[serde(alias = "SOC_D")] soc_d: Option<f32>,
     #[serde(alias = "TMP_A")] outdoor_temperature: Option<f32>,
+}
+
+/// Outcome of parsing the bytes received so far.
+#[derive(Debug)]
+enum Frame {
+    /// A full response object has arrived.
+    Complete(WicanResponse),
+    /// The object is not closed yet (or the bytes are not JSON); keep reading.
+    Incomplete,
+    /// A well-formed object that does not match the expected fields.
+    Invalid(serde_json::Error),
+}
+
+/// Decide whether `buf` holds a full response. Only the first JSON value is
+/// read: bytes before the first `{` are skipped and bytes after the value are
+/// ignored. A value that the parser cannot finish yet is incomplete.
+fn parse_frame(buf: &[u8]) -> Frame {
+    let Some(start) = buf.iter().position(|&b| b == b'{') else {
+        return Frame::Incomplete;
+    };
+    let mut values = serde_json::Deserializer::from_slice(&buf[start..]).into_iter::<WicanResponse>();
+    match values.next() {
+        Some(Ok(r)) => Frame::Complete(r),
+        Some(Err(e)) if e.is_data() => Frame::Invalid(e),
+        Some(Err(_)) | None => Frame::Incomplete,
+    }
+}
+
+/// Time left before `deadline`; zero at or past it.
+fn remaining(deadline: Instant, now: Instant) -> Duration {
+    deadline.saturating_duration_since(now)
+}
+
+/// How a response parse failure should be handled.
+#[derive(Debug, PartialEq, Eq)]
+enum ParseClass {
+    /// The response is well-formed but lacks or mangles an expected field;
+    /// repeating the poll will not change that.
+    Config,
+    /// Truncated or malformed bytes; the next poll may parse.
+    Transient,
+}
+
+fn classify_parse_error(e: &serde_json::Error) -> ParseClass {
+    if e.is_data() { ParseClass::Config } else { ParseClass::Transient }
+}
+
+/// Bytes arrived but no full response did before the deadline.
+#[derive(Debug)]
+struct PartialResponse {
+    received: usize,
+    secs: u8,
+}
+
+impl std::fmt::Display for PartialResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "WiCAN response incomplete after {}s ({} bytes received)", self.secs, self.received)
+    }
+}
+
+impl std::error::Error for PartialResponse {}
+
+/// Error for a read that reached its deadline: a partial response may
+/// complete on the next poll, silence means the link is not delivering.
+fn deadline_error(received: usize, secs: u8) -> anyhow::Error {
+    if received == 0 {
+        anyhow!("WiCAN sent no response within {secs}s")
+    } else {
+        anyhow::Error::new(PartialResponse { received, secs })
+    }
+}
+
+/// What `poll` does with a failed read.
+#[derive(Debug, PartialEq, Eq)]
+enum PollClass {
+    /// Fields missing or invalid in a complete response.
+    Config,
+    /// Retry on the next poll over the same connection.
+    Transient,
+    /// Reconnect.
+    Fatal,
+}
+
+fn poll_class(e: &anyhow::Error) -> PollClass {
+    if let Some(je) = e.downcast_ref::<serde_json::Error>() {
+        return match classify_parse_error(je) {
+            ParseClass::Config => PollClass::Config,
+            ParseClass::Transient => PollClass::Transient,
+        };
+    }
+    if e.downcast_ref::<PartialResponse>().is_some() {
+        return PollClass::Transient;
+    }
+    PollClass::Fatal
 }
 
 /// BlueZ reports a stale or mismatched bond as a failed or rejected
@@ -43,6 +137,8 @@ pub struct WicanAdapter {
     session: Option<Session>,
     adapter: Option<BluerAdapter>,
     device: Option<Device>,
+    chars: Option<(Characteristic, Characteristic)>,
+    config_warned: bool,
     _agent_handle: Option<bluer::agent::AgentHandle>,
 }
 
@@ -50,8 +146,9 @@ impl WicanAdapter {
     pub fn new(mac: &str, passkey: Option<u32>, max_retries: u8, timeout_secs: u8) -> anyhow::Result<Self> {
         let addr: Address = mac.parse().map_err(|_| anyhow!("invalid WiCAN MAC '{mac}'"))?;
         Ok(Self {
-            mac: addr, passkey, max_retries, timeout_secs,
-            session: None, adapter: None, device: None, _agent_handle: None,
+            mac: addr, passkey, max_retries: max_retries.max(1), timeout_secs: timeout_secs.max(1),
+            session: None, adapter: None, device: None, chars: None,
+            config_warned: false, _agent_handle: None,
         })
     }
 
@@ -142,40 +239,38 @@ impl WicanAdapter {
     }
 
     async fn fetch_metrics(&self) -> anyhow::Result<Metrics> {
-        let device = self.device.as_ref().context("device missing")?;
-        let (notify_ch, write_ch) = Self::find_chars(device).await?;
+        let (notify_ch, write_ch) = self.chars.as_ref().context("characteristics not resolved")?;
 
         let mut stream = Box::pin(notify_ch.notify().await?);
         write_ch.write(b"autopid -d\n").await?;
         info!("WiCAN autopid request sent; waiting up to {}s", self.timeout_secs);
 
         let mut buf: Vec<u8> = Vec::new();
-        let start = time::Instant::now();
-        let total = Duration::from_secs(self.timeout_secs as u64);
-        loop {
-            if start.elapsed() >= total {
+        let deadline = Instant::now() + Duration::from_secs(self.timeout_secs as u64);
+        let resp = loop {
+            if remaining(deadline, Instant::now()).is_zero() {
                 warn!("WiCAN response timed out after {}s", self.timeout_secs);
-                break;
+                return Err(deadline_error(buf.len(), self.timeout_secs));
             }
-            let remaining = total - start.elapsed();
             tokio::select! {
-                _ = time::sleep(remaining) => break,
+                _ = time::sleep_until(deadline) => {}
                 next = stream.next() => match next {
                     Some(b) => {
                         buf.extend_from_slice(&b);
-                        if let Ok(s) = std::str::from_utf8(&buf) {
-                            if s.trim().ends_with('}') { break; }
+                        match parse_frame(&buf) {
+                            Frame::Complete(r) => break r,
+                            Frame::Invalid(e) => {
+                                return Err(anyhow::Error::new(e).context(format!(
+                                    "WiCAN JSON fields invalid: '{}'",
+                                    String::from_utf8_lossy(&buf))));
+                            }
+                            Frame::Incomplete => {}
                         }
                     }
-                    None => break,
+                    None => return Err(anyhow!("WiCAN notify stream ended after {} bytes", buf.len())),
                 }
             }
-        }
-        if buf.is_empty() { return Err(anyhow!("empty WiCAN response")); }
-
-        let s = String::from_utf8(buf).context("WiCAN response not utf-8")?;
-        let resp: WicanResponse = serde_json::from_str(s.trim())
-            .with_context(|| format!("WiCAN JSON parse failed: '{s}'"))?;
+        };
         debug!("WiCAN parsed: {resp:?}");
 
         let mut metrics = Metrics::new();
@@ -194,27 +289,46 @@ impl Adapter for WicanAdapter {
             .map_err(|e| AdapterError::FatalConn(anyhow!("bluer session: {e}")))?;
         let adapter = session.default_adapter().await
             .map_err(|e| AdapterError::FatalConn(anyhow!("default adapter: {e}")))?;
+        self.chars = None;
+        self.config_warned = false;
         self.session = Some(session);
         self.adapter = Some(adapter);
 
         let device = self.find_device().await.map_err(AdapterError::FatalConn)?;
         self.try_pair(&device).await.map_err(AdapterError::FatalConn)?;
         self.try_connect(&device).await.map_err(AdapterError::FatalConn)?;
+        let found = Self::find_chars(&device).await;
         self.device = Some(device);
-        Ok(())
+        match found {
+            Ok(c) => {
+                self.chars = Some(c);
+                Ok(())
+            }
+            Err(e) => {
+                self.disconnect().await;
+                Err(AdapterError::FatalConn(e))
+            }
+        }
     }
 
     async fn poll(&mut self) -> Result<Metrics, AdapterError> {
         match self.fetch_metrics().await {
             Ok(m) => Ok(m),
             Err(e) => {
-                // A malformed JSON burst is transient (the next poll may parse);
-                // anything else is treated as a lost connection. Classify on the
-                // error type, not its message text.
-                if e.downcast_ref::<serde_json::Error>().is_some() {
-                    Err(AdapterError::Transient(e))
-                } else {
-                    Err(AdapterError::FatalConn(e))
+                // Parse failures keep the connection: truncated bytes may parse
+                // next time, and a field mismatch is logged once per connection.
+                // Anything else is treated as a lost connection.
+                match poll_class(&e) {
+                    PollClass::Config => {
+                        if !self.config_warned {
+                            self.config_warned = true;
+                            warn!("WiCAN response has a missing or invalid field ({e:#}); \
+                                   check the adapter's AutoPid configuration");
+                        }
+                        Err(AdapterError::Transient(e))
+                    }
+                    PollClass::Transient => Err(AdapterError::Transient(e)),
+                    PollClass::Fatal => Err(AdapterError::FatalConn(e)),
                 }
             }
         }
@@ -225,6 +339,7 @@ impl Adapter for WicanAdapter {
             let _ = d.disconnect().await;
         }
         self.device = None;
+        self.chars = None;
         self._agent_handle = None;
     }
 
@@ -238,6 +353,48 @@ mod tests {
     use super::*;
 
     #[test]
+    fn remaining_never_underflows() {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        assert_eq!(remaining(deadline, deadline - Duration::from_nanos(1)), Duration::from_nanos(1));
+        assert_eq!(remaining(deadline, deadline), Duration::ZERO);
+        assert_eq!(remaining(deadline, deadline + Duration::from_secs(3)), Duration::ZERO);
+    }
+
+    #[test]
+    fn nested_close_at_chunk_boundary_is_incomplete() {
+        let whole = br#"{"SOC": 55.5, "extra": {"a": 1}, "TMP_A": 7.0}"#;
+        let cut = whole.iter().position(|&b| b == b'}').unwrap() + 1;
+        assert!(matches!(parse_frame(&whole[..cut]), Frame::Incomplete));
+        match parse_frame(whole) {
+            Frame::Complete(r) => assert_eq!(r.soc, 55.5),
+            other => panic!("expected complete, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn trailing_and_leading_bytes_do_not_hide_a_complete_object() {
+        for buf in [
+            &br#"{"SOC": 1.5}>"#[..],
+            br#"{"SOC": 1.5}{"SOC": 2.5}"#,
+            br#"> {"SOC": 1.5}"#,
+            b"\x00\xffjunk\n{\"SOC\": 1.5}\r\n>",
+        ] {
+            match parse_frame(buf) {
+                Frame::Complete(r) => assert_eq!(r.soc, 1.5),
+                other => panic!("{:?}: {other:?}", String::from_utf8_lossy(buf)),
+            }
+        }
+        assert!(matches!(parse_frame(br#"> {"SOC": 1."#), Frame::Incomplete));
+    }
+
+    #[test]
+    fn deadline_with_partial_data_is_transient_and_silence_is_fatal() {
+        assert_eq!(poll_class(&deadline_error(10, 4)), PollClass::Transient);
+        assert_eq!(poll_class(&deadline_error(0, 4)), PollClass::Fatal);
+        assert_eq!(poll_class(&anyhow!("notify stream ended")), PollClass::Fatal);
+    }
+
+    #[test]
     fn only_authentication_errors_drop_the_bond() {
         use bluer::{Error, ErrorKind};
         let mk = |kind| Error { kind, message: String::new() };
@@ -247,5 +404,14 @@ mod tests {
         assert!(!is_auth_failure(&mk(ErrorKind::AuthenticationCanceled)));
         assert!(!is_auth_failure(&mk(ErrorKind::Failed)));
         assert!(!is_auth_failure(&mk(ErrorKind::InProgress)));
+    }
+
+    #[test]
+    fn missing_soc_is_config_and_truncated_is_transient() {
+        let missing = serde_json::from_str::<WicanResponse>(r#"{"TMP_A": 3.0}"#).unwrap_err();
+        assert_eq!(classify_parse_error(&missing), ParseClass::Config);
+        assert!(matches!(parse_frame(br#"{"TMP_A": 3.0}"#), Frame::Invalid(_)));
+        let cut = serde_json::from_str::<WicanResponse>(r#"{"SOC": 5"#).unwrap_err();
+        assert_eq!(classify_parse_error(&cut), ParseClass::Transient);
     }
 }
