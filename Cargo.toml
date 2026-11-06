@@ -10,7 +10,6 @@ readme = 'README.md'
 include = ['/README.md', '/LICENSE', '/Cargo.toml', '/Cargo.lock', '/src/*.rs', '/src/**/*.rs', '/profiles/*.json', '/testdata/*', 'images/*']
 keywords = ['canze', 'can', 'renault', 'zoe', 'ze', 'ev', 'obd', 'ioniq', 'ev6', 'mg4', 'niro', 'kia', 'hyundai', 'aa-proxy-rs']
 categories = ['command-line-utilities']
-homepage = 'https://github.com/aa-proxy/aa-proxy-obd'
 repository = 'https://github.com/aa-proxy/aa-proxy-obd'
 
 [dependencies]
