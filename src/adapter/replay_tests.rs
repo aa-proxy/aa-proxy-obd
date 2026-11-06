@@ -347,7 +347,8 @@ async fn zoe_cycle(cfg: EmuConfig, tires: [u8; 4]) -> (Vec<(String, Result<Metri
             .respond_payload("10C0", "50 C0")
             .respond_payload("222002", "62 20 02 0A 26")
             .respond_payload("222006", "62 20 06 02 15 04")
-            .respond_payload("22320C", "62 32 0C 08 5D"),
+            .respond_payload("22320C", "62 32 0C 08 5D")
+            .respond_payload("223451", "62 34 51 00 1E"),
     ];
     let p = profile("zoe");
     let init = profile_init(&p);
@@ -371,6 +372,8 @@ fn zoe_expected(tires: [u8; 4]) -> Vec<(String, HashMap<String, f32>)> {
         ("222002".to_string(), [("battery_level_percentage".to_string(), 51.96)].into()),
         ("222006".to_string(), [("odometer_km".to_string(), 136452.0)].into()),
         ("22320C".to_string(), [("battery_level_wh".to_string(), 10705.0)].into()),
+        // From a real car log: 223451 answered 62 34 51 00 1E at 24.28 % SOC.
+        ("223451".to_string(), [("range_km".to_string(), 30.0)].into()),
         ("2174".to_string(), [("tire_rr_kpa".to_string(), t(tires[0])), ("tire_rl_kpa".to_string(), t(tires[1])),
          ("tire_fr_kpa".to_string(), t(tires[2])), ("tire_fl_kpa".to_string(), t(tires[3]))].into()),
     ];
