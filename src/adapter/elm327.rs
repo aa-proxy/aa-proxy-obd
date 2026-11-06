@@ -388,13 +388,9 @@ where
             }
         }
         // ATMA streams continuously; do not wait for a '>' prompt.
-        self.resync().await?;
-        self.stream.write_all(format!("{}\r", spec.command).as_bytes()).await
-            .context("broadcast command write")?;
-
-        let deadline = tokio::time::Instant::now() + Duration::from_millis(spec.deadline_ms);
+        let scan_start = tokio::time::Instant::now();
+        let deadline = scan_start + Duration::from_millis(spec.deadline_ms);
         let mut lines: Vec<String> = Vec::new();
-        let mut consecutive_timeouts: u64 = 0;
         let idle_attempts = spec.idle_timeout_ms.div_ceil(200).max(1);
 
         // CAN-IDs whose frame carries a field listed in stop_when. Once a line
@@ -405,7 +401,17 @@ where
             .map(|f| f.can_id.clone())
             .collect();
         let mut seen_ids: HashSet<String> = HashSet::new();
+        // True while the last thing read from the adapter was a prompt, i.e.
+        // the ELM is idle and a CR would repeat the command.
         let mut prompt_seen = false;
+        // Why the scan ended, for the log.
+        let mut ended_by = "deadline";
+        let mut stray_prompts = 0u32;
+
+        self.resync().await?;
+        self.stream.write_all(format!("{}\r", spec.command).as_bytes()).await
+            .context("broadcast command write")?;
+        let mut consecutive_timeouts: u64 = 0;
 
         while tokio::time::Instant::now() < deadline {
             match self.read_line(200).await {
@@ -419,10 +425,24 @@ where
                     consecutive_timeouts = 0;
                     let ascii = String::from_utf8_lossy(&b).into_owned();
                     if ascii.contains('>') {
+                        if lines.is_empty() {
+                            // Some adapters print a prompt right after the
+                            // command and still start monitoring. Writing
+                            // anything now would stop it, so keep reading.
+                            // This does not count as the ELM being idle
+                            // (prompt_seen stays false): on a quiet bus it
+                            // may still be monitoring when the idle timeout
+                            // ends the scan, and then it needs the stop CR.
+                            stray_prompts += 1;
+                            continue;
+                        }
                         prompt_seen = true;
+                        ended_by = "prompt from the adapter";
                         break;
                     }
                     if !ascii.trim().is_empty() {
+                        // Data after a prompt: the ELM is monitoring.
+                        prompt_seen = false;
                         if let Some(id) = ascii.split_whitespace().next() {
                             if id.chars().all(|c| c.is_ascii_hexdigit()) {
                                 seen_ids.insert(id.to_string());
@@ -430,16 +450,33 @@ where
                         }
                         lines.push(ascii);
                         if !needed_ids.is_empty() && needed_ids.iter().all(|id| seen_ids.contains(id)) {
+                            ended_by = "stop_when frames seen";
                             break;
                         }
                     }
                 }
                 Err(e) if e.kind() == ErrorKind::TimedOut => {
                     consecutive_timeouts += 1;
-                    if consecutive_timeouts >= idle_attempts { break; }
+                    if consecutive_timeouts >= idle_attempts {
+                        ended_by = "idle timeout";
+                        break;
+                    }
                 }
                 Err(e) => return Err(anyhow::Error::new(e).context("broadcast read")),
             }
+        }
+
+        let mut ids: Vec<&String> = seen_ids.iter().collect();
+        ids.sort();
+        debug!(
+            "broadcast scan ended by {ended_by} after {} ms, {} lines, {stray_prompts} stray prompt(s), CAN-IDs seen: {ids:?}",
+            scan_start.elapsed().as_millis(), lines.len()
+        );
+        trace!("broadcast lines (first 20): {:?}", &lines[..lines.len().min(20)]);
+        let mut missing: Vec<&String> = needed_ids.iter().filter(|id| !seen_ids.contains(*id)).collect();
+        missing.sort();
+        if !missing.is_empty() {
+            warn!("broadcast scan ended by {ended_by} without frame(s) {missing:?}");
         }
 
         // Stop ATMA cleanly: send a CR, then read until the '>' prompt. The
@@ -463,6 +500,7 @@ where
                 if let Some(latest) = payloads.last() {
                     for fld in frame.fields.iter().filter(|f| f.enabled) {
                         if let Some(v) = extract_value_broadcast(latest, fld) {
+                            debug!("{}: {}", fld.name, v);
                             metrics.insert(fld.name.clone(), v);
                         }
                     }

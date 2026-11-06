@@ -569,6 +569,88 @@ async fn broadcast_then_poll_stays_in_sync() {
     assert!(bad.is_empty(), "{}\nlog: {log:?}", bad.join("\n"));
 }
 
+/// The adapter prints a prompt right after ATMA and then starts monitoring
+/// anyway (seen on a real dongle). The prompt is not the end of the scan, and
+/// ATMA is not sent again, which would stop the monitoring.
+#[tokio::test(start_paused = true)]
+async fn broadcast_scan_ignores_a_stray_prompt_after_atma() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let p = profile("zoe");
+    let spec = p.sources.iter().find_map(|src| match src {
+        Source::Broadcast(b) => Some(b.clone()),
+        _ => None,
+    }).unwrap();
+    let (a, mut b) = tokio::io::duplex(1024);
+    let adapter = tokio::spawn(async move {
+        let mut atma = 0;
+        let mut buf = [0u8; 64];
+        loop {
+            let n = b.read(&mut buf).await.unwrap();
+            if n == 0 { return atma; }
+            let cmd = String::from_utf8_lossy(&buf[..n]).trim().to_string();
+            match cmd.as_str() {
+                "ATMA" => {
+                    atma += 1;
+                    // Prompt first, monitoring starts anyway.
+                    b.write_all(b">").await.unwrap();
+                    tokio::time::sleep(Duration::from_millis(60)).await;
+                    b.write_all(b"656 00 00 00 00 00 00 40 00\r").await.unwrap();
+                }
+                "" | "\r" => { b.write_all(b"\r>").await.unwrap(); }
+                _ => { b.write_all(b"OK\r\r>").await.unwrap(); }
+            }
+        }
+    });
+    let mut s = Elm327Session::new(a);
+    let got = s.monitor_broadcast(&spec).await.unwrap();
+    assert_eq!(got.get("external_temp_celsius"), Some(&24.0), "{got:?}");
+    drop(s);
+    assert_eq!(adapter.await.unwrap(), 1, "ATMA must not be sent again while monitoring");
+}
+
+/// The adapter prints a stray prompt after ATMA, keeps monitoring and no frame
+/// comes before the idle timeout (quiet bus). The ELM is still monitoring, so
+/// the scan must stop it with a CR; otherwise the next command's first
+/// character is taken as the stop character and every reply is off by one.
+#[tokio::test(start_paused = true)]
+async fn broadcast_stray_prompt_then_silence_sends_stop_cr() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let p = profile("zoe");
+    let spec = p.sources.iter().find_map(|src| match src {
+        Source::Broadcast(b) => Some(b.clone()),
+        _ => None,
+    }).unwrap();
+    let (a, mut b) = tokio::io::duplex(1024);
+    let adapter = tokio::spawn(async move {
+        let mut monitoring = false;
+        let mut buf = [0u8; 64];
+        loop {
+            let n = b.read(&mut buf).await.unwrap();
+            if n == 0 { return; }
+            let cmd = String::from_utf8_lossy(&buf[..n]).trim().to_string();
+            if monitoring {
+                // Any character stops monitoring; the rest is read as a command.
+                monitoring = false;
+                b.write_all(b"\r>").await.unwrap();
+                if !cmd.is_empty() { b.write_all(b"?\r\r>").await.unwrap(); }
+                continue;
+            }
+            match cmd.as_str() {
+                "ATMA" => { monitoring = true; b.write_all(b">").await.unwrap(); }
+                "ATI" => b.write_all(b"ELM327 v1.5\r\r>").await.unwrap(),
+                _ => b.write_all(b"OK\r\r>").await.unwrap(),
+            }
+        }
+    });
+    let mut s = Elm327Session::new(a);
+    let got = s.monitor_broadcast(&spec).await.unwrap();
+    assert!(got.is_empty(), "{got:?}");
+    let reply = s.send_cmd("ATI").await.unwrap();
+    assert!(String::from_utf8_lossy(&reply).contains("ELM327"), "{reply:?}");
+    drop(s);
+    adapter.await.unwrap();
+}
+
 /// When the ELM leaves monitoring by itself and prints its prompt, no stop
 /// character is sent: a lone CR would repeat ATMA, and the next command's first
 /// character would then be taken as the stop character.
