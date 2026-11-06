@@ -36,6 +36,16 @@
     },
     {
       "kind": "uds_pid",
+      "ecu_tx": "7E4",
+      "ecu_rx": "7EC",
+      "pid": "223451",
+      "pre_request": "10C0",
+      "fields": [
+        {"name": "range_km", "byte_index": -2, "length": 2, "multiplier": 1.0, "offset": 0.0}
+      ]
+    },
+    {
+      "kind": "uds_pid",
       "ecu_tx": "745",
       "ecu_rx": "765",
       "pid": "2174",
