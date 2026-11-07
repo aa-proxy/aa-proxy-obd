@@ -146,7 +146,7 @@ The `wican` device type connects over Bluetooth, so it shares the `bt_*` options
 The config is validated at load and a failure exits with code 1 and a message naming the key. `poll_interval_secs` and `car_sleep_interval_secs` must be finite and at least 0.1; `usb_baud` must be at least 1; `bt_mac` must not be the placeholder `AA:BB:CC:DD:EE:FF` shown in the examples above, so set it to the adapter's MAC. Unknown keys (for example a misspelled `poll_intervall_secs`) are logged as warnings and ignored.
 `raw_topic`, when set, must be 1 to 64 characters of letters, digits, `_` or `-`.
 
-Profiles are validated the same way when loaded: `vehicle.profile` may contain only `a-z`, `0-9`, `_`, `-` and `.` (no `..` or path separators), ECU IDs must be 3, 6 or 8 hex digits, PIDs hex with an even length, and each field needs a complete `byte_index`+`length` pair (length 1 to 3, or 1 to 2 in broadcast frames) or `bit_offset`+`bit_length` pair (length 1 to 16); when both are set the bit pair is used. Broadcast sources need `deadline_ms` > 0, with `can_id` of 3 or 8 hex digits.
+Profiles are validated the same way when loaded: `vehicle.profile` may contain only `a-z`, `0-9`, `_`, `-` and `.` (no `..` or path separators), ECU IDs must be 3, 6 or 8 hex digits, PIDs hex with an even length, and each field needs a complete `byte_index`+`length` pair (length 1 to 4, or 1 to 2 in broadcast frames) or `bit_offset`+`bit_length` pair (length 1 to 16); when both are set the bit pair is used. Broadcast sources need `deadline_ms` > 0, with `can_id` of 3 or 8 hex digits.
 
 ## Vehicle profiles
 Profile JSON files ship under [`profiles/`](profiles/). At install time, copy them to `/etc/aa-proxy-obd/<profile>.json` (e.g. `profiles/ev6.json` → `/etc/aa-proxy-obd/ev6.json`). The daemon lowercases `vehicle.profile` before building the path, so the file name must be lowercase.
@@ -200,7 +200,7 @@ Only `kind` and `frames` are required; the values below are the defaults.
 |---|---|:---:|---|
 | `name` | string | yes | Recognised names route into a known endpoint payload; unknown names are logged but not POSTed. |
 | `byte_index` | i32 | one of byte/bit | **`uds_pid`:** offset from after the UDS header (e.g. `62 XX XX`), so 0 = first data byte; negative counts from the end. **`broadcast`:** offset from the start of the CAN data bytes (no header). |
-| `length` | usize | with `byte_index` | 1, 2, or 3 bytes |
+| `length` | usize | with `byte_index` | 1, 2, 3 or 4 bytes (`uds_pid`); 1 or 2 bytes (`broadcast`) |
 | `bit_offset` | u32 | one of byte/bit | Motorola/big-endian bit index (bit 0 = MSB of byte 0) |
 | `bit_length` | u32 | with `bit_offset` | 1..=16 |
 | `multiplier` | f32 | no (default 1.0) | `raw × multiplier + offset` |
