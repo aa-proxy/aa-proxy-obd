@@ -37,7 +37,6 @@ pub struct DeviceConfig {
     pub usb_baud: Option<u32>,
 }
 
-
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct VehicleSection {
     #[serde(default)]
@@ -72,40 +71,58 @@ pub struct DaemonSection {
     pub raw_topic: Option<String>,
 }
 
-fn default_poll_interval_secs()        -> f32    { 10.0 }
-fn default_car_sleep_interval_secs()   -> f32    { 100.0 }
-fn default_log_level()                 -> String { "info".to_string() }
-fn default_log_file()                  -> String { "/var/log/aa-proxy-obd.log".to_string() }
-fn default_api_base_url()              -> String { "http://localhost".to_string() }
-fn default_bridge_dropouts()           -> bool   { true }
-fn default_publish_failure_threshold() -> u32    { 5 }
-fn default_publish_breaker_secs()      -> u64    { 300 }
-fn default_cycle_failure_limit()       -> u32    { 20 }
+fn default_poll_interval_secs() -> f32 {
+    10.0
+}
+fn default_car_sleep_interval_secs() -> f32 {
+    100.0
+}
+fn default_log_level() -> String {
+    "info".to_string()
+}
+fn default_log_file() -> String {
+    "/var/log/aa-proxy-obd.log".to_string()
+}
+fn default_api_base_url() -> String {
+    "http://localhost".to_string()
+}
+fn default_bridge_dropouts() -> bool {
+    true
+}
+fn default_publish_failure_threshold() -> u32 {
+    5
+}
+fn default_publish_breaker_secs() -> u64 {
+    300
+}
+fn default_cycle_failure_limit() -> u32 {
+    20
+}
 
 impl Default for DaemonSection {
     fn default() -> Self {
         Self {
-            poll_interval_secs:        default_poll_interval_secs(),
-            car_sleep_interval_secs:   default_car_sleep_interval_secs(),
-            log_level:                 default_log_level(),
-            log_file:                  default_log_file(),
-            api_base_url:              default_api_base_url(),
-            bridge_dropouts:           default_bridge_dropouts(),
+            poll_interval_secs: default_poll_interval_secs(),
+            car_sleep_interval_secs: default_car_sleep_interval_secs(),
+            log_level: default_log_level(),
+            log_file: default_log_file(),
+            api_base_url: default_api_base_url(),
+            bridge_dropouts: default_bridge_dropouts(),
             publish_failure_threshold: default_publish_failure_threshold(),
-            publish_breaker_secs:      default_publish_breaker_secs(),
-            cycle_failure_limit:       default_cycle_failure_limit(),
-            raw_topic:                 None,
+            publish_breaker_secs: default_publish_breaker_secs(),
+            cycle_failure_limit: default_cycle_failure_limit(),
+            raw_topic: None,
         }
     }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
-    pub device:  DeviceConfig,
+    pub device: DeviceConfig,
     #[serde(default)]
     pub vehicle: VehicleSection,
     #[serde(default)]
-    pub daemon:  DaemonSection,
+    pub daemon: DaemonSection,
 }
 
 const PLACEHOLDER_MAC: &str = "AA:BB:CC:DD:EE:FF";
@@ -113,14 +130,26 @@ const MIN_INTERVAL_SECS: f32 = 0.1;
 const MAX_RAW_TOPIC_CHARS: usize = 64;
 
 const DEVICE_KEYS: &[&str] = &[
-    "type", "bt_mac", "bt_passkey", "bt_max_connect_retries", "bt_timeout_secs",
-    "usb_port", "usb_baud",
+    "type",
+    "bt_mac",
+    "bt_passkey",
+    "bt_max_connect_retries",
+    "bt_timeout_secs",
+    "usb_port",
+    "usb_baud",
 ];
 const VEHICLE_KEYS: &[&str] = &["profile", "battery_capacity_wh"];
 const DAEMON_KEYS: &[&str] = &[
-    "poll_interval_secs", "car_sleep_interval_secs", "log_level", "log_file",
-    "api_base_url", "bridge_dropouts", "publish_failure_threshold",
-    "publish_breaker_secs", "cycle_failure_limit", "raw_topic",
+    "poll_interval_secs",
+    "car_sleep_interval_secs",
+    "log_level",
+    "log_file",
+    "api_base_url",
+    "bridge_dropouts",
+    "publish_failure_threshold",
+    "publish_breaker_secs",
+    "cycle_failure_limit",
+    "raw_topic",
 ];
 
 fn invalid(msg: String) -> Error {
@@ -143,7 +172,9 @@ fn check_interval(key: &str, value: f32) -> io::Result<()> {
 /// defines.
 fn unknown_keys(value: &toml::Value) -> Vec<String> {
     let mut out = Vec::new();
-    let Some(root) = value.as_table() else { return out };
+    let Some(root) = value.as_table() else {
+        return out;
+    };
     for (section, body) in root {
         let known: &[&str] = match section.as_str() {
             "device" => DEVICE_KEYS,
@@ -190,10 +221,17 @@ impl Config {
 
     fn parse(raw: &str, path: &Path) -> io::Result<(Self, Vec<String>)> {
         let cfg: Config = toml::from_str(raw).map_err(|e| {
-            invalid(format!("Failed to parse TOML in '{}': {}", path.display(), e))
+            invalid(format!(
+                "Failed to parse TOML in '{}': {}",
+                path.display(),
+                e
+            ))
         })?;
         cfg.validate().map_err(|e| {
-            Error::new(e.kind(), format!("Invalid config '{}': {}", path.display(), e))
+            Error::new(
+                e.kind(),
+                format!("Invalid config '{}': {}", path.display(), e),
+            )
         })?;
         let warnings = match toml::from_str::<toml::Value>(raw) {
             Ok(v) => unknown_keys(&v)
@@ -212,7 +250,9 @@ impl Config {
         if let Some(topic) = &d.raw_topic {
             let ok = !topic.is_empty()
                 && topic.len() <= MAX_RAW_TOPIC_CHARS
-                && topic.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+                && topic
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
             if !ok {
                 return Err(invalid(format!(
                     "daemon.raw_topic must be 1 to {MAX_RAW_TOPIC_CHARS} characters of A-Z, a-z, 0-9, '_' or '-', got '{topic}'"
@@ -323,7 +363,10 @@ mod tests {
         let e = parse("[device]\ntype = \"usb\"\nusb_baud = 0\n").unwrap_err();
         assert!(e.to_string().contains("usb_baud"));
         // Zero disables the watchdog and the breaker timer; both stay valid.
-        assert!(parse(&with_daemon("cycle_failure_limit = 0\npublish_breaker_secs = 0")).is_ok());
+        assert!(parse(&with_daemon(
+            "cycle_failure_limit = 0\npublish_breaker_secs = 0"
+        ))
+        .is_ok());
     }
 
     #[test]
@@ -392,13 +435,27 @@ mod tests {
                 usb_port: Some("p".into()),
                 usb_baud: Some(1),
             },
-            vehicle: VehicleSection { profile: Some("p".into()), battery_capacity_wh: Some(1) },
-            daemon: DaemonSection { raw_topic: Some("obd".into()), ..DaemonSection::default() },
+            vehicle: VehicleSection {
+                profile: Some("p".into()),
+                battery_capacity_wh: Some(1),
+            },
+            daemon: DaemonSection {
+                raw_topic: Some("obd".into()),
+                ..DaemonSection::default()
+            },
         };
         let value = toml::Value::try_from(&cfg).unwrap();
-        for (section, known) in [("device", DEVICE_KEYS), ("vehicle", VEHICLE_KEYS), ("daemon", DAEMON_KEYS)] {
-            let mut got: Vec<&str> =
-                value[section].as_table().unwrap().keys().map(String::as_str).collect();
+        for (section, known) in [
+            ("device", DEVICE_KEYS),
+            ("vehicle", VEHICLE_KEYS),
+            ("daemon", DAEMON_KEYS),
+        ] {
+            let mut got: Vec<&str> = value[section]
+                .as_table()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect();
             let mut want = known.to_vec();
             got.sort_unstable();
             want.sort_unstable();
@@ -410,9 +467,11 @@ mod tests {
 
     #[test]
     fn raw_topic_accepts_a_plain_name_only() {
-        let with = |topic: &str| format!(
+        let with = |topic: &str| {
+            format!(
             "[device]\ntype = \"usb\"\nusb_port = \"/dev/ttyUSB0\"\n[daemon]\nraw_topic = \"{topic}\"\n"
-        );
+        )
+        };
         let (cfg, _) = Config::parse(&with("obd_golf-7"), Path::new("t")).unwrap();
         assert_eq!(cfg.daemon.raw_topic.as_deref(), Some("obd_golf-7"));
         for bad in ["", "obd.rpm", "has space", &"x".repeat(65)] {

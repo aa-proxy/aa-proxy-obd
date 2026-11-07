@@ -40,11 +40,17 @@ pub async fn register_passkey_agent(
             Box::pin(async move {
                 match passkey_for(req.device, device, passkey) {
                     Some(pk) => {
-                        info!("device {} requested a passkey; supplying configured value", req.device);
+                        info!(
+                            "device {} requested a passkey; supplying configured value",
+                            req.device
+                        );
                         Ok(pk)
                     }
                     None => {
-                        warn!("rejecting passkey request from unexpected device {}", req.device);
+                        warn!(
+                            "rejecting passkey request from unexpected device {}",
+                            req.device
+                        );
                         Err(ReqError::Rejected)
                     }
                 }
@@ -52,7 +58,10 @@ pub async fn register_passkey_agent(
         })),
         ..Default::default()
     };
-    session.register_agent(agent).await.context("register passkey agent")
+    session
+        .register_agent(agent)
+        .await
+        .context("register passkey agent")
 }
 
 #[cfg(test)]

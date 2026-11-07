@@ -5,7 +5,10 @@ use crate::adapter::elm327::{poll_sources, Elm327Session, DEFAULT_INIT};
 use crate::profile::VehicleProfile;
 use anyhow::anyhow;
 use async_trait::async_trait;
-use bluer::{rfcomm::{SocketAddr, Stream}, Address};
+use bluer::{
+    rfcomm::{SocketAddr, Stream},
+    Address,
+};
 use log::{debug, info, warn};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -30,7 +33,8 @@ impl BluetoothElm327Adapter {
         max_retries: u8,
         timeout_secs: u8,
     ) -> anyhow::Result<Self> {
-        let addr: Address = mac.parse()
+        let addr: Address = mac
+            .parse()
             .map_err(|_| anyhow!("invalid bluetooth MAC '{mac}'"))?;
         Ok(Self {
             target: SocketAddr::new(addr, 1u8),
@@ -53,18 +57,23 @@ impl Adapter for BluetoothElm327Adapter {
         // adapter; re-registering on every reconnect would repeatedly claim the
         // system default agent.
         if let (Some(pk), None) = (self.bt_passkey, self._agent_handle.as_ref()) {
-            let session = bluer::Session::new().await
+            let session = bluer::Session::new()
+                .await
                 .map_err(|e| AdapterError::FatalConn(anyhow!("bluer session: {e}")))?;
-            let handle = crate::adapter::pairing::register_passkey_agent(&session, pk, self.target.addr).await
-                .map_err(AdapterError::FatalConn)?;
+            let handle =
+                crate::adapter::pairing::register_passkey_agent(&session, pk, self.target.addr)
+                    .await
+                    .map_err(AdapterError::FatalConn)?;
             self.bluer_session = Some(session);
             self._agent_handle = Some(handle);
         }
         let connect_timeout = Duration::from_secs(u64::from(self.timeout_secs.max(1)));
         let mut connected: Option<Stream> = None;
         for attempt in 1..=self.max_retries {
-            info!("Connecting to {} ch {} (attempt {}/{})",
-                self.target.addr, self.target.channel, attempt, self.max_retries);
+            info!(
+                "Connecting to {} ch {} (attempt {}/{})",
+                self.target.addr, self.target.channel, attempt, self.max_retries
+            );
             let mut candidate = match timeout(connect_timeout, Stream::connect(self.target)).await {
                 Ok(Ok(s)) => s,
                 Ok(Err(e)) => {
@@ -75,7 +84,10 @@ impl Adapter for BluetoothElm327Adapter {
                     continue;
                 }
                 Err(_) => {
-                    warn!("BT connect attempt {attempt} timed out after {}s", self.timeout_secs);
+                    warn!(
+                        "BT connect attempt {attempt} timed out after {}s",
+                        self.timeout_secs
+                    );
                     if attempt < self.max_retries {
                         tokio::time::sleep(Duration::from_secs(2)).await;
                     }
@@ -86,8 +98,11 @@ impl Adapter for BluetoothElm327Adapter {
             // bluer local-address workaround
             // https://github.com/bluez/bluer/discussions/130#discussioncomment-8845113
             let mut i = 0;
-            while candidate.as_ref().local_addr()
-                .map(|a| a.addr == bluer::Address::any()).unwrap_or(false)
+            while candidate
+                .as_ref()
+                .local_addr()
+                .map(|a| a.addr == bluer::Address::any())
+                .unwrap_or(false)
             {
                 debug!("Waiting for local address...");
                 tokio::time::sleep(Duration::from_secs(1)).await;
@@ -115,16 +130,24 @@ impl Adapter for BluetoothElm327Adapter {
             break;
         }
         let stream = connected.ok_or_else(|| {
-            AdapterError::FatalConn(anyhow!("BT connect failed after {} attempts", self.max_retries))
+            AdapterError::FatalConn(anyhow!(
+                "BT connect failed after {} attempts",
+                self.max_retries
+            ))
         })?;
 
-        let init: Vec<String> = self.profile.elm327.as_ref()
+        let init: Vec<String> = self
+            .profile
+            .elm327
+            .as_ref()
             .and_then(|e| e.init.clone())
             .unwrap_or_else(|| DEFAULT_INIT.iter().map(|s| s.to_string()).collect());
         let init_refs: Vec<&str> = init.iter().map(String::as_str).collect();
 
         let mut session = Elm327Session::new(stream);
-        session.run_init(&init_refs).await
+        session
+            .run_init(&init_refs)
+            .await
             .map_err(AdapterError::FatalConn)?;
 
         self.session = Some(session);
@@ -133,7 +156,9 @@ impl Adapter for BluetoothElm327Adapter {
     }
 
     async fn poll(&mut self) -> Result<Metrics, AdapterError> {
-        let session = self.session.as_mut()
+        let session = self
+            .session
+            .as_mut()
             .ok_or_else(|| AdapterError::FatalConn(anyhow!("not connected")))?;
 
         poll_sources(session, &self.profile).await
@@ -155,10 +180,14 @@ impl Adapter for BluetoothElm327Adapter {
 // to the prompt, or 2 s, so a late reply is not left
 // in the stream to be taken as the answer to ATZ.
 pub(crate) async fn probe_rfcomm_link<S>(stream: &mut S) -> std::io::Result<()>
-where S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-    timeout(Duration::from_secs(2), stream.write_all(b"\r")).await
-        .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "probe write timed out"))??;
+    timeout(Duration::from_secs(2), stream.write_all(b"\r"))
+        .await
+        .map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::TimedOut, "probe write timed out")
+        })??;
     let mut buf = [0u8; 256];
     let read = timeout(Duration::from_secs(2), async {
         loop {
@@ -173,7 +202,8 @@ where S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
                 return Ok(());
             }
         }
-    }).await;
+    })
+    .await;
     // No data within the window is not a failure; a read error or a closed
     // peer is.
     read.unwrap_or(Ok(()))
@@ -193,13 +223,17 @@ mod tests {
             peer.read_exact(&mut cr).await.unwrap();
             drop(peer);
         });
-        let err = probe_rfcomm_link(&mut host).await.expect_err("closed peer must fail the probe");
+        let err = probe_rfcomm_link(&mut host)
+            .await
+            .expect_err("closed peer must fail the probe");
         assert_eq!(err.kind(), ErrorKind::UnexpectedEof, "{err}");
     }
 
     #[tokio::test(start_paused = true)]
     async fn probe_accepts_a_silent_peer() {
         let (mut host, _peer) = tokio::io::duplex(64);
-        probe_rfcomm_link(&mut host).await.expect("a read timeout is not a failure");
+        probe_rfcomm_link(&mut host)
+            .await
+            .expect("a read timeout is not a failure");
     }
 }

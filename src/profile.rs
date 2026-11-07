@@ -36,8 +36,12 @@ pub struct FieldSpec {
     pub enabled: bool,
 }
 
-fn one_f32() -> f32 { 1.0 }
-fn default_true() -> bool { true }
+fn one_f32() -> f32 {
+    1.0
+}
+fn default_true() -> bool {
+    true
+}
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct UdsPidSource {
@@ -75,9 +79,15 @@ pub struct BroadcastSource {
 fn default_broadcast_init() -> Vec<String> {
     vec!["ATCRA".into(), "ATH1".into(), "ATS1".into()]
 }
-fn default_broadcast_command() -> String { "ATMA".into() }
-fn default_deadline_ms()       -> u64    { 6000 }
-fn default_idle_timeout_ms()   -> u64    { 600 }
+fn default_broadcast_command() -> String {
+    "ATMA".into()
+}
+fn default_deadline_ms() -> u64 {
+    6000
+}
+fn default_idle_timeout_ms() -> u64 {
+    600
+}
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -114,13 +124,17 @@ fn check_field(ctx: &str, f: &FieldSpec, max_len: usize) -> Result<(), String> {
     let any_bytes = f.byte_index.is_some() || f.length.is_some();
     let any_bits = f.bit_offset.is_some() || f.bit_length.is_some();
     if !any_bytes && !any_bits {
-        return Err(format!("{ctx}: set byte_index+length or bit_offset+bit_length"));
+        return Err(format!(
+            "{ctx}: set byte_index+length or bit_offset+bit_length"
+        ));
     }
     if any_bytes && (f.byte_index.is_none() || f.length.is_none()) {
         return Err(format!("{ctx}: byte_index and length must be set together"));
     }
     if any_bits && (f.bit_offset.is_none() || f.bit_length.is_none()) {
-        return Err(format!("{ctx}: bit_offset and bit_length must be set together"));
+        return Err(format!(
+            "{ctx}: bit_offset and bit_length must be set together"
+        ));
     }
     if let Some(n) = f.length {
         if !(1..=max_len).contains(&n) {
@@ -145,9 +159,7 @@ impl VehicleProfile {
                     let ctx = format!("{file}: source {i} (uds_pid)");
                     for (key, v) in [("ecu_tx", &s.ecu_tx), ("ecu_rx", &s.ecu_rx)] {
                         if !is_valid_can_id(v) {
-                            return Err(format!(
-                                "{ctx}: {key} '{v}' must be 3, 6 or 8 hex digits"
-                            ));
+                            return Err(format!("{ctx}: {key} '{v}' must be 3, 6 or 8 hex digits"));
                         }
                     }
                     if !is_hex(&s.pid) || s.pid.len() % 2 != 0 {
@@ -168,9 +180,7 @@ impl VehicleProfile {
                     for frame in &b.frames {
                         let id = &frame.can_id;
                         if !is_hex(id) || !matches!(id.len(), 3 | 8) {
-                            return Err(format!(
-                                "{ctx}: can_id '{id}' must be 3 or 8 hex digits"
-                            ));
+                            return Err(format!("{ctx}: can_id '{id}' must be 3 or 8 hex digits"));
                         }
                         let fctx = format!("{ctx}, frame {id}");
                         for f in &frame.fields {
@@ -192,7 +202,9 @@ impl VehicleProfile {
         if name.is_empty()
             || name.contains("..")
             || name.contains(['/', '\\'])
-            || !name.bytes().all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'_' | b'-' | b'.'))
+            || !name
+                .bytes()
+                .all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'_' | b'-' | b'.'))
         {
             return Err(Error::new(
                 ErrorKind::InvalidInput,
@@ -202,7 +214,10 @@ impl VehicleProfile {
         let path = dir.join(format!("{name}.json"));
         let filename = path.display().to_string();
         let raw = fs::read_to_string(&path).map_err(|e| {
-            Error::new(e.kind(), format!("Failed to read profile '{}': {}", filename, e))
+            Error::new(
+                e.kind(),
+                format!("Failed to read profile '{}': {}", filename, e),
+            )
         })?;
         let mut profile: VehicleProfile = serde_json::from_str(&raw).map_err(|e| {
             Error::new(
@@ -336,7 +351,10 @@ mod tests {
             (r#""ecu_tx":"7E4","ecu_rx":"7EC","pid":"22ZZ""#, "pid"),
         ] {
             let e = with_source(r#"{"name":"f","byte_index":3,"length":1}"#, head).unwrap_err();
-            assert!(e.contains(needle) && e.contains("t.json") && e.contains("source 0"), "{e}");
+            assert!(
+                e.contains(needle) && e.contains("t.json") && e.contains("source 0"),
+                "{e}"
+            );
         }
         for tx in ["7E4", "18DA10F1", "18DA10"] {
             let head = format!(r#""ecu_tx":"{tx}","ecu_rx":"7EC","pid":"220105""#);
@@ -348,16 +366,31 @@ mod tests {
     fn field_addressing_needs_a_complete_pair() {
         let cases = [
             (r#"{"name":"f"}"#, "byte_index+length or bit_offset"),
-                        (r#"{"name":"f","byte_index":1}"#, "together"),
+            (r#"{"name":"f","byte_index":1}"#, "together"),
             (r#"{"name":"f","bit_offset":1}"#, "together"),
-            (r#"{"name":"f","byte_index":1,"length":0}"#, "length must be 1..=4"),
-            (r#"{"name":"f","byte_index":1,"length":5}"#, "length must be 1..=4"),
-            (r#"{"name":"f","bit_offset":1,"bit_length":0}"#, "bit_length must be 1..=16"),
-            (r#"{"name":"f","bit_offset":1,"bit_length":17}"#, "bit_length must be 1..=16"),
+            (
+                r#"{"name":"f","byte_index":1,"length":0}"#,
+                "length must be 1..=4",
+            ),
+            (
+                r#"{"name":"f","byte_index":1,"length":5}"#,
+                "length must be 1..=4",
+            ),
+            (
+                r#"{"name":"f","bit_offset":1,"bit_length":0}"#,
+                "bit_length must be 1..=16",
+            ),
+            (
+                r#"{"name":"f","bit_offset":1,"bit_length":17}"#,
+                "bit_length must be 1..=16",
+            ),
         ];
         for (field, needle) in cases {
             let e = with_source(field, OK_HEAD).unwrap_err();
-            assert!(e.contains(needle) && e.contains("field 'f'"), "{field}: {e}");
+            assert!(
+                e.contains(needle) && e.contains("field 'f'"),
+                "{field}: {e}"
+            );
         }
         with_source(r#"{"name":"f","bit_offset":4,"bit_length":16}"#, OK_HEAD).unwrap();
         let both = r#"{"name":"f","byte_index":1,"length":1,"bit_offset":0,"bit_length":1}"#;
@@ -387,7 +420,10 @@ mod tests {
         with_len(1).unwrap();
         with_len(2).unwrap();
         let e = with_len(3).unwrap_err();
-        assert!(e.contains("length must be 1..=2") && e.contains("field 'f'"), "{e}");
+        assert!(
+            e.contains("length must be 1..=2") && e.contains("field 'f'"),
+            "{e}"
+        );
     }
 
     #[test]
@@ -398,7 +434,9 @@ mod tests {
         broadcast(500, 600, "673").unwrap();
         assert!(broadcast(6000, 600, "67").unwrap_err().contains("can_id"));
         assert!(broadcast(6000, 600, "67G").unwrap_err().contains("can_id"));
-        assert!(broadcast(6000, 600, "18DAF1").unwrap_err().contains("can_id"));
+        assert!(broadcast(6000, 600, "18DAF1")
+            .unwrap_err()
+            .contains("can_id"));
     }
 
     #[test]
@@ -429,12 +467,16 @@ mod tests {
         let e = VehicleProfile::load_from(&tmp, "bad").unwrap_err();
         std::fs::remove_dir_all(&tmp).ok();
         assert_eq!(e.kind(), ErrorKind::InvalidData);
-        assert!(e.to_string().contains("bad.json") && e.to_string().contains("ecu_tx"), "{e}");
+        assert!(
+            e.to_string().contains("bad.json") && e.to_string().contains("ecu_tx"),
+            "{e}"
+        );
     }
 
     #[test]
     fn load_uppercases_broadcast_can_ids() {
-        let tmp = std::env::temp_dir().join(format!("aa-proxy-obd-prof-case-{}", std::process::id()));
+        let tmp =
+            std::env::temp_dir().join(format!("aa-proxy-obd-prof-case-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
         std::fs::write(
             tmp.join("lower.json"),
@@ -445,7 +487,9 @@ mod tests {
         .unwrap();
         let p = VehicleProfile::load_from(&tmp, "lower");
         std::fs::remove_dir_all(&tmp).ok();
-        let Source::Broadcast(b) = &p.unwrap().sources[0] else { panic!("expected Broadcast") };
+        let Source::Broadcast(b) = &p.unwrap().sources[0] else {
+            panic!("expected Broadcast")
+        };
         let ids: Vec<&str> = b.frames.iter().map(|f| f.can_id.as_str()).collect();
         assert_eq!(ids, ["6A3", "18DAF110"]);
     }

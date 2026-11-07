@@ -1,6 +1,6 @@
 extern crate ctrlc;
-use clap::builder::styling::{AnsiColor, Styles};
 use anyhow::Context;
+use clap::builder::styling::{AnsiColor, Styles};
 use clap::Parser;
 use log::info;
 use std::path::PathBuf;
@@ -35,9 +35,11 @@ struct Args {
     command: Option<Commands>,
 
     /// Override the configured log level to debug
-    #[arg(short, long)] debug: bool,
+    #[arg(short, long)]
+    debug: bool,
     /// Config file path
-    #[arg(short, long, default_value = "/etc/aa-proxy-obd.toml")] config: PathBuf,
+    #[arg(short, long, default_value = "/etc/aa-proxy-obd.toml")]
+    config: PathBuf,
 }
 
 #[derive(clap::Subcommand, Debug)]
@@ -50,7 +52,6 @@ enum Commands {
     },
 }
 
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
@@ -62,7 +63,10 @@ async fn main() -> anyhow::Result<()> {
 
     let (cfg, config_warnings) = match Config::load_with_warnings(&args.config) {
         Ok(c) => c,
-        Err(e) => { eprintln!("aa-proxy-obd: config load failed: {e}"); std::process::exit(1); }
+        Err(e) => {
+            eprintln!("aa-proxy-obd: config load failed: {e}");
+            std::process::exit(1);
+        }
     };
     logging::init(&cfg.daemon.log_level, &cfg.daemon.log_file, args.debug)?;
     for w in &config_warnings {
@@ -73,8 +77,9 @@ async fn main() -> anyhow::Result<()> {
 
     let profile = match cfg.device.kind {
         DeviceType::Bluetooth | DeviceType::Usb => {
-            let name = cfg.vehicle.profile.clone()
-                .ok_or_else(|| anyhow::anyhow!("vehicle.profile required for ELM327 device types"))?;
+            let name = cfg.vehicle.profile.clone().ok_or_else(|| {
+                anyhow::anyhow!("vehicle.profile required for ELM327 device types")
+            })?;
             let p = VehicleProfile::load(&name)?;
             info!("Loaded profile: <b><green>{}</>", p.name);
             Some(p)
@@ -86,28 +91,45 @@ async fn main() -> anyhow::Result<()> {
     let bt_retries = cfg.device.bt_max_connect_retries.unwrap_or(5);
     let bt_timeout = cfg.device.bt_timeout_secs.unwrap_or(10);
 
-    let adapter: Box<dyn Adapter> = match cfg.device.kind {
-        DeviceType::Bluetooth => {
-            let mac = cfg.device.bt_mac.clone()
-                .ok_or_else(|| anyhow::anyhow!("device.bt_mac required for type='bluetooth'"))?;
-            let prof = profile.expect("profile present for ELM327 types");
-            Box::new(BluetoothElm327Adapter::new(
-                &mac, prof, cfg.device.bt_passkey, bt_retries, bt_timeout)?)
-        }
-        DeviceType::Usb => {
-            let port = cfg.device.usb_port.clone()
-                .ok_or_else(|| anyhow::anyhow!("device.usb_port required for type='usb'"))?;
-            let baud = cfg.device.usb_baud.unwrap_or(115200);
-            let prof = profile.expect("profile present for ELM327 types");
-            Box::new(crate::adapter::usb::UsbElm327Adapter::new(&port, baud, prof)?)
-        }
-        DeviceType::Wican => {
-            let mac = cfg.device.bt_mac.clone()
-                .ok_or_else(|| anyhow::anyhow!("device.bt_mac required for type='wican'"))?;
-            Box::new(crate::adapter::wican::WicanAdapter::new(
-                &mac, cfg.device.bt_passkey, bt_retries, bt_timeout)?)
-        }
-    };
+    let adapter: Box<dyn Adapter> =
+        match cfg.device.kind {
+            DeviceType::Bluetooth => {
+                let mac = cfg.device.bt_mac.clone().ok_or_else(|| {
+                    anyhow::anyhow!("device.bt_mac required for type='bluetooth'")
+                })?;
+                let prof = profile.expect("profile present for ELM327 types");
+                Box::new(BluetoothElm327Adapter::new(
+                    &mac,
+                    prof,
+                    cfg.device.bt_passkey,
+                    bt_retries,
+                    bt_timeout,
+                )?)
+            }
+            DeviceType::Usb => {
+                let port =
+                    cfg.device.usb_port.clone().ok_or_else(|| {
+                        anyhow::anyhow!("device.usb_port required for type='usb'")
+                    })?;
+                let baud = cfg.device.usb_baud.unwrap_or(115200);
+                let prof = profile.expect("profile present for ELM327 types");
+                Box::new(crate::adapter::usb::UsbElm327Adapter::new(
+                    &port, baud, prof,
+                )?)
+            }
+            DeviceType::Wican => {
+                let mac =
+                    cfg.device.bt_mac.clone().ok_or_else(|| {
+                        anyhow::anyhow!("device.bt_mac required for type='wican'")
+                    })?;
+                Box::new(crate::adapter::wican::WicanAdapter::new(
+                    &mac,
+                    cfg.device.bt_passkey,
+                    bt_retries,
+                    bt_timeout,
+                )?)
+            }
+        };
     let publisher = Publisher::new(
         cfg.daemon.api_base_url.clone(),
         cfg.vehicle.battery_capacity_wh,
@@ -116,14 +138,15 @@ async fn main() -> anyhow::Result<()> {
         cfg.daemon.bridge_dropouts,
     )
     .context("build HTTP publisher")?
-    .with_poll_interval(std::time::Duration::from_secs_f32(cfg.daemon.poll_interval_secs))
+    .with_poll_interval(std::time::Duration::from_secs_f32(
+        cfg.daemon.poll_interval_secs,
+    ))
     .with_raw_topic(cfg.daemon.raw_topic.clone());
 
     let shutdown = Arc::new(scheduler::Shutdown::new());
     {
         let s = shutdown.clone();
-        ctrlc::set_handler(move || s.trigger())
-            .context("install Ctrl-C handler")?;
+        ctrlc::set_handler(move || s.trigger()).context("install Ctrl-C handler")?;
     }
 
     match scheduler::run(adapter, cfg.daemon, publisher, shutdown).await {

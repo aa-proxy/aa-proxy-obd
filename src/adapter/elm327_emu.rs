@@ -46,20 +46,31 @@ pub struct Ecu {
 
 impl Ecu {
     pub fn new(tx: u32, rx: u32) -> Self {
-        Self { tx, rx, functional: false, responses: HashMap::new() }
+        Self {
+            tx,
+            rx,
+            functional: false,
+            responses: HashMap::new(),
+        }
     }
-    pub fn functional(mut self) -> Self { self.functional = true; self }
+    pub fn functional(mut self) -> Self {
+        self.functional = true;
+        self
+    }
     /// Add a response given as hex strings, one per CAN frame (PCI included).
     pub fn respond(mut self, request: &str, frames: &[&str]) -> Self {
         let frames: Vec<Vec<u8>> = frames.iter().map(|f| hex(f)).collect();
-        for f in &frames { check_pci(request, f); }
+        for f in &frames {
+            check_pci(request, f);
+        }
         self.responses.insert(request.to_ascii_uppercase(), frames);
         self
     }
     /// Add a UDS/OBD response given as the plain payload ("62 01 05 ...");
     /// it is split into ISO-TP frames.
     pub fn respond_payload(mut self, request: &str, payload: &str) -> Self {
-        self.responses.insert(request.to_ascii_uppercase(), isotp_frames(&hex(payload)));
+        self.responses
+            .insert(request.to_ascii_uppercase(), isotp_frames(&hex(payload)));
         self
     }
 }
@@ -139,7 +150,15 @@ struct State {
 
 impl State {
     fn reset() -> Self {
-        Self { echo: true, headers: false, spaces: true, linefeeds: false, sh: 0x7DF, cra: None, last_cmd: None }
+        Self {
+            echo: true,
+            headers: false,
+            spaces: true,
+            linefeeds: false,
+            sh: 0x7DF,
+            cra: None,
+            last_cmd: None,
+        }
     }
 }
 
@@ -171,7 +190,9 @@ async fn run(mut io: DuplexStream, cfg: EmuConfig, ecus: Vec<Ecu>, log: CommandL
                 line.clear();
                 st = State::reset();
                 let out = format!("\r\r{}\r\r>", cfg.banner);
-                if io.write_all(out.as_bytes()).await.is_err() { return; }
+                if io.write_all(out.as_bytes()).await.is_err() {
+                    return;
+                }
                 continue;
             }
             match timeout(until - now, io.read(&mut byte)).await {
@@ -196,12 +217,22 @@ async fn run(mut io: DuplexStream, cfg: EmuConfig, ecus: Vec<Ecu>, log: CommandL
         match byte[0] {
             b'\r' => {}
             b'\n' => continue,
-            b => { line.push(b as char); continue; }
+            b => {
+                line.push(b as char);
+                continue;
+            }
         }
 
         let typed = std::mem::take(&mut line);
-        let cmd: String = typed.chars().filter(|c| !c.is_whitespace()).collect::<String>().to_ascii_uppercase();
-        if drop_first.as_deref().is_some_and(|d| d.eq_ignore_ascii_case(&cmd)) {
+        let cmd: String = typed
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect::<String>()
+            .to_ascii_uppercase();
+        if drop_first
+            .as_deref()
+            .is_some_and(|d| d.eq_ignore_ascii_case(&cmd))
+        {
             drop_first = None;
             log.lock().unwrap().push((typed, false));
             continue;
@@ -209,16 +240,27 @@ async fn run(mut io: DuplexStream, cfg: EmuConfig, ecus: Vec<Ecu>, log: CommandL
         log.lock().unwrap().push((typed.clone(), true));
 
         let mut latency = cfg.reply_latency_ms;
-        if first_reply { latency += cfg.first_reply_latency_ms; first_reply = false; }
-        if let Some((_, ms)) = cfg.slow_commands.iter().find(|(c, _)| c.eq_ignore_ascii_case(&cmd)) {
+        if first_reply {
+            latency += cfg.first_reply_latency_ms;
+            first_reply = false;
+        }
+        if let Some((_, ms)) = cfg
+            .slow_commands
+            .iter()
+            .find(|(c, _)| c.eq_ignore_ascii_case(&cmd))
+        {
             latency += *ms;
         }
-        if latency > 0 { sleep(Duration::from_millis(latency)).await; }
+        if latency > 0 {
+            sleep(Duration::from_millis(latency)).await;
+        }
         let mut out = String::new();
         if st.echo {
             out.push_str(&typed);
             out.push('\r');
-            if st.linefeeds { out.push('\n'); }
+            if st.linefeeds {
+                out.push('\n');
+            }
         }
 
         let cmd = if cmd.is_empty() {
@@ -227,7 +269,9 @@ async fn run(mut io: DuplexStream, cfg: EmuConfig, ecus: Vec<Ecu>, log: CommandL
                 None => {
                     out.push('?');
                     out.push_str(&end(&st));
-                    if io.write_all(out.as_bytes()).await.is_err() { return; }
+                    if io.write_all(out.as_bytes()).await.is_err() {
+                        return;
+                    }
                     continue;
                 }
             }
@@ -237,14 +281,20 @@ async fn run(mut io: DuplexStream, cfg: EmuConfig, ecus: Vec<Ecu>, log: CommandL
         st.last_cmd = Some(cmd.clone());
 
         if cmd == "ATZ" || cmd == "ATWS" {
-            if io.write_all(out.as_bytes()).await.is_err() { return; }
+            if io.write_all(out.as_bytes()).await.is_err() {
+                return;
+            }
             resetting_until = Some(Instant::now() + Duration::from_millis(cfg.reset_ms));
             continue;
         }
 
         if cmd == "ATMA" {
-            if io.write_all(out.as_bytes()).await.is_err() { return; }
-            if !monitor(&mut io, &cfg, &st).await { return; }
+            if io.write_all(out.as_bytes()).await.is_err() {
+                return;
+            }
+            if !monitor(&mut io, &cfg, &st).await {
+                return;
+            }
             continue;
         }
 
@@ -255,29 +305,44 @@ async fn run(mut io: DuplexStream, cfg: EmuConfig, ecus: Vec<Ecu>, log: CommandL
             None => vec!["?".into()],
         };
 
-        if io.write_all(out.as_bytes()).await.is_err() { return; }
+        if io.write_all(out.as_bytes()).await.is_err() {
+            return;
+        }
         let eol = if st.linefeeds { "\r\n" } else { "\r" };
         let mut interrupted = false;
         for (i, l) in body.iter().enumerate() {
             if i > 0 && cfg.line_delay_ms > 0 {
                 match pause(&mut io, &cfg, cfg.line_delay_ms).await {
                     Pause::Closed => return,
-                    Pause::Interrupted => { interrupted = true; break; }
+                    Pause::Interrupted => {
+                        interrupted = true;
+                        break;
+                    }
                     Pause::Elapsed => {}
                 }
             }
-            if io.write_all(format!("{l}{eol}").as_bytes()).await.is_err() { return; }
+            if io.write_all(format!("{l}{eol}").as_bytes()).await.is_err() {
+                return;
+            }
         }
         // After the last frame the ELM keeps listening for further replies
         // for up to the AT ST time before it prints the prompt.
         if is_obd && !interrupted && cfg.post_reply_wait_ms > 0 {
-            if let Pause::Closed = pause(&mut io, &cfg, cfg.post_reply_wait_ms).await { return; }
+            if let Pause::Closed = pause(&mut io, &cfg, cfg.post_reply_wait_ms).await {
+                return;
+            }
         }
-        if io.write_all(format!("{eol}>").as_bytes()).await.is_err() { return; }
+        if io.write_all(format!("{eol}>").as_bytes()).await.is_err() {
+            return;
+        }
     }
 }
 
-enum Pause { Elapsed, Interrupted, Closed }
+enum Pause {
+    Elapsed,
+    Interrupted,
+    Closed,
+}
 
 /// Wait `ms` while the ELM is busy with an OBD request. With
 /// `interrupt_aborts`, a received character ends the wait (the datasheet:
@@ -299,37 +364,90 @@ async fn pause(io: &mut DuplexStream, cfg: &EmuConfig, ms: u64) -> Pause {
 }
 
 fn end(st: &State) -> String {
-    if st.linefeeds { "\r\n\r\n>".into() } else { "\r\r>".into() }
+    if st.linefeeds {
+        "\r\n\r\n>".into()
+    } else {
+        "\r\r>".into()
+    }
 }
 
 fn at_command(cmd: &str, st: &mut State, cfg: &EmuConfig) -> Option<String> {
-    if !cmd.starts_with("AT") { return None; }
+    if !cmd.starts_with("AT") {
+        return None;
+    }
     let arg = &cmd[2..];
     let ok = Some("OK".to_string());
     match arg {
-        "E0" => { st.echo = false; ok }
-        "E1" => { st.echo = true; ok }
-        "H0" => { st.headers = false; ok }
-        "H1" => { st.headers = true; ok }
-        "S0" => { st.spaces = false; ok }
-        "S1" => { st.spaces = true; ok }
-        "L0" => { st.linefeeds = false; ok }
-        "L1" => { st.linefeeds = true; ok }
+        "E0" => {
+            st.echo = false;
+            ok
+        }
+        "E1" => {
+            st.echo = true;
+            ok
+        }
+        "H0" => {
+            st.headers = false;
+            ok
+        }
+        "H1" => {
+            st.headers = true;
+            ok
+        }
+        "S0" => {
+            st.spaces = false;
+            ok
+        }
+        "S1" => {
+            st.spaces = true;
+            ok
+        }
+        "L0" => {
+            st.linefeeds = false;
+            ok
+        }
+        "L1" => {
+            st.linefeeds = true;
+            ok
+        }
         "I" => Some(cfg.banner.clone()),
-        "CRA" => { st.cra = None; ok }
-        _ if arg.starts_with("CRA") => parse_header(&arg[3..]).map(|h| { st.cra = Some(h); "OK".to_string() }).or(Some("?".into())),
-        _ if arg.starts_with("SH") => parse_header(&arg[2..]).map(|h| { st.sh = h; "OK".to_string() }).or(Some("?".into())),
-        _ if arg.starts_with("FCSH") => parse_header(&arg[4..]).map(|_| "OK".to_string()).or(Some("?".into())),
+        "CRA" => {
+            st.cra = None;
+            ok
+        }
+        _ if arg.starts_with("CRA") => parse_header(&arg[3..])
+            .map(|h| {
+                st.cra = Some(h);
+                "OK".to_string()
+            })
+            .or(Some("?".into())),
+        _ if arg.starts_with("SH") => parse_header(&arg[2..])
+            .map(|h| {
+                st.sh = h;
+                "OK".to_string()
+            })
+            .or(Some("?".into())),
+        _ if arg.starts_with("FCSH") => parse_header(&arg[4..])
+            .map(|_| "OK".to_string())
+            .or(Some("?".into())),
         _ if ["AL", "AT0", "AT1", "AT2", "CAF0", "CAF1", "D"].contains(&arg)
-            || arg.starts_with("ST") || arg.starts_with("CP") || arg.starts_with("FCSD")
-            || arg.starts_with("FCSM") || arg.starts_with("SP") => ok,
+            || arg.starts_with("ST")
+            || arg.starts_with("CP")
+            || arg.starts_with("FCSD")
+            || arg.starts_with("FCSM")
+            || arg.starts_with("SP") =>
+        {
+            ok
+        }
         _ => Some("?".into()),
     }
 }
 
 /// ATSH/ATCRA accept 3, 6 or 8 hex digits.
 fn parse_header(s: &str) -> Option<u32> {
-    if ![3, 6, 8].contains(&s.len()) { return None; }
+    if ![3, 6, 8].contains(&s.len()) {
+        return None;
+    }
     u32::from_str_radix(s, 16).ok()
 }
 
@@ -341,13 +459,21 @@ fn obd_request(cmd: &str, st: &State, ecus: &[Ecu]) -> Vec<String> {
     let mut lines = Vec::new();
     for ecu in ecus {
         let addressed = ecu.tx == st.sh || (st.sh == 0x7DF && ecu.functional);
-        if !addressed { continue; }
-        if let Some(cra) = st.cra { if cra != ecu.rx { continue; } }
+        if !addressed {
+            continue;
+        }
+        if let Some(cra) = st.cra {
+            if cra != ecu.rx {
+                continue;
+            }
+        }
         if let Some(frames) = ecu.responses.get(cmd) {
             lines.extend(render(ecu.rx, frames, st));
         }
     }
-    if lines.is_empty() { lines.push("NO DATA".into()); }
+    if lines.is_empty() {
+        lines.push("NO DATA".into());
+    }
     lines
 }
 
@@ -360,12 +486,15 @@ fn fmt_bytes(b: &[u8], spaces: bool) -> String {
 fn render(rx: u32, frames: &[Vec<u8>], st: &State) -> Vec<String> {
     let sep = if st.spaces { " " } else { "" };
     if st.headers {
-        return frames.iter()
+        return frames
+            .iter()
             .map(|f| format!("{rx:03X}{sep}{}", fmt_bytes(f, st.spaces)))
             .collect();
     }
     let mut out = Vec::new();
-    let Some(first) = frames.first() else { return out };
+    let Some(first) = frames.first() else {
+        return out;
+    };
     match first[0] >> 4 {
         0 => {
             let n = (first[0] & 0x0F) as usize;
@@ -376,7 +505,11 @@ fn render(rx: u32, frames: &[Vec<u8>], st: &State) -> Vec<String> {
             out.push(format!("{total:03X}"));
             out.push(format!("0:{sep}{}", fmt_bytes(&first[2..], st.spaces)));
             for f in &frames[1..] {
-                out.push(format!("{:X}:{sep}{}", f[0] & 0x0F, fmt_bytes(&f[1..], st.spaces)));
+                out.push(format!(
+                    "{:X}:{sep}{}",
+                    f[0] & 0x0F,
+                    fmt_bytes(&f[1..], st.spaces)
+                ));
             }
         }
         _ => out.push(fmt_bytes(first, st.spaces)),
@@ -403,13 +536,18 @@ async fn monitor(io: &mut DuplexStream, cfg: &EmuConfig, st: &State) -> bool {
             return false;
         }
         if cfg.monitor_self_stop_after.is_some_and(|n| i >= n) {
-            return io.write_all(format!("BUFFER FULL{eol}{eol}>").as_bytes()).await.is_ok();
+            return io
+                .write_all(format!("BUFFER FULL{eol}{eol}>").as_bytes())
+                .await
+                .is_ok();
         }
         if let Ok(r) = timeout(Duration::from_millis(20), io.read(&mut byte)).await {
             return match r {
                 Ok(n) if n > 0 => {
                     if cfg.monitor_stop_delay_ms > 0 {
-                        if !cfg.broadcast.is_empty() && io.write_all(line(i).as_bytes()).await.is_err() {
+                        if !cfg.broadcast.is_empty()
+                            && io.write_all(line(i).as_bytes()).await.is_err()
+                        {
                             return false;
                         }
                         sleep(Duration::from_millis(cfg.monitor_stop_delay_ms)).await;
@@ -419,10 +557,15 @@ async fn monitor(io: &mut DuplexStream, cfg: &EmuConfig, st: &State) -> bool {
                 _ => false,
             };
         }
-        if cfg.broadcast.is_empty() { i += 1; continue; }
+        if cfg.broadcast.is_empty() {
+            i += 1;
+            continue;
+        }
         let l = line(i);
         i += 1;
-        if io.write_all(l.as_bytes()).await.is_err() { return false; }
+        if io.write_all(l.as_bytes()).await.is_err() {
+            return false;
+        }
     }
 }
 
@@ -437,7 +580,8 @@ fn check_pci(request: &str, f: &[u8]) {
     assert!(
         f.len() >= need,
         "response to {request}: frame {} is {} byte(s), its PCI needs at least {need}",
-        fmt_bytes(f, true), f.len()
+        fmt_bytes(f, true),
+        f.len()
     );
 }
 
@@ -446,21 +590,36 @@ pub fn hex(s: &str) -> Vec<u8> {
         panic!("hex: unexpected character {c:?} in {s:?}");
     }
     let s: String = s.chars().filter(|c| c.is_ascii_hexdigit()).collect();
-    assert!(s.len().is_multiple_of(2), "hex: odd number of digits in {s:?}");
-    (0..s.len() / 2).map(|i| u8::from_str_radix(&s[2 * i..2 * i + 2], 16).unwrap()).collect()
+    assert!(
+        s.len().is_multiple_of(2),
+        "hex: odd number of digits in {s:?}"
+    );
+    (0..s.len() / 2)
+        .map(|i| u8::from_str_radix(&s[2 * i..2 * i + 2], 16).unwrap())
+        .collect()
 }
 
 /// Split a payload into ISO-TP frames (padding 0xAA).
 pub fn isotp_frames(payload: &[u8]) -> Vec<Vec<u8>> {
-    assert!(payload.len() <= 0xFFF, "isotp_frames: payload of {} bytes exceeds 0xFFF", payload.len());
-    let pad = |mut f: Vec<u8>| { f.resize(8, 0xAA); f };
+    assert!(
+        payload.len() <= 0xFFF,
+        "isotp_frames: payload of {} bytes exceeds 0xFFF",
+        payload.len()
+    );
+    let pad = |mut f: Vec<u8>| {
+        f.resize(8, 0xAA);
+        f
+    };
     if payload.len() <= 7 {
         let mut f = vec![payload.len() as u8];
         f.extend_from_slice(payload);
         return vec![pad(f)];
     }
     let mut frames = Vec::new();
-    let mut f = vec![0x10 | ((payload.len() >> 8) as u8 & 0x0F), payload.len() as u8];
+    let mut f = vec![
+        0x10 | ((payload.len() >> 8) as u8 & 0x0F),
+        payload.len() as u8,
+    ];
     f.extend_from_slice(&payload[..6]);
     frames.push(f);
     for (i, chunk) in payload[6..].chunks(7).enumerate() {

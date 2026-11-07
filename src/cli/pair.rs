@@ -20,7 +20,10 @@ pub async fn run(config_path: &Path, passkey_arg: Option<u32>) -> Result<()> {
 
     let (mac_str, key_name) = match cfg.device.kind {
         DeviceType::Bluetooth | DeviceType::Wican => (
-            cfg.device.bt_mac.clone().ok_or_else(|| anyhow!("[device].bt_mac is required"))?,
+            cfg.device
+                .bt_mac
+                .clone()
+                .ok_or_else(|| anyhow!("[device].bt_mac is required"))?,
             "bt_passkey",
         ),
         DeviceType::Usb => return Err(anyhow!("`pair` is not applicable for device.type = 'usb'")),
@@ -34,7 +37,9 @@ pub async fn run(config_path: &Path, passkey_arg: Option<u32>) -> Result<()> {
             io::stdout().flush().ok();
             let mut line = String::new();
             io::stdin().read_line(&mut line).context("read passkey")?;
-            line.trim().parse::<u32>().context("passkey must be a number")?
+            line.trim()
+                .parse::<u32>()
+                .context("passkey must be a number")?
         }
     };
 
@@ -52,17 +57,22 @@ pub async fn run(config_path: &Path, passkey_arg: Option<u32>) -> Result<()> {
             use futures_util::StreamExt;
             while let Some(ev) = events.next().await {
                 if let bluer::AdapterEvent::DeviceAdded(addr) = ev {
-                    if addr == mac { return Ok::<(), anyhow::Error>(()); }
+                    if addr == mac {
+                        return Ok::<(), anyhow::Error>(());
+                    }
                 }
             }
             Err(anyhow!("discovery ended without seeing the target"))
-        }).await;
+        })
+        .await;
         match found {
             Ok(Ok(())) => info!("device discovered"),
             Ok(Err(e)) => return Err(e.context("discovery failed")),
-            Err(_) => return Err(anyhow!(
-                "discovery timed out after 15s; ensure the device is powered and advertising"
-            )),
+            Err(_) => {
+                return Err(anyhow!(
+                    "discovery timed out after 15s; ensure the device is powered and advertising"
+                ))
+            }
         }
     }
 
@@ -76,7 +86,11 @@ pub async fn run(config_path: &Path, passkey_arg: Option<u32>) -> Result<()> {
     device.pair().await.context("pair failed")?;
     println!("Pairing succeeded.");
 
-    print!("Save passkey to {} under [device].{}? [y/N]: ", config_path.display(), key_name);
+    print!(
+        "Save passkey to {} under [device].{}? [y/N]: ",
+        config_path.display(),
+        key_name
+    );
     io::stdout().flush().ok();
     let mut answer = String::new();
     if let Err(e) = io::stdin().read_line(&mut answer) {
@@ -95,7 +109,9 @@ pub async fn run(config_path: &Path, passkey_arg: Option<u32>) -> Result<()> {
 /// Update the config file in place, preserving comments and formatting.
 fn write_passkey_to_config(path: &Path, key_name: &str, passkey: u32) -> Result<()> {
     let raw = std::fs::read_to_string(path).context("read config for write-back")?;
-    let mut doc = raw.parse::<toml_edit::DocumentMut>().context("parse config as TOML")?;
+    let mut doc = raw
+        .parse::<toml_edit::DocumentMut>()
+        .context("parse config as TOML")?;
     if doc.get("device").is_none() {
         doc["device"] = toml_edit::Item::Table(toml_edit::Table::new());
     }
@@ -116,7 +132,9 @@ fn write_atomic(path: &Path, contents: &[u8]) -> Result<()> {
         Some(d) if !d.as_os_str().is_empty() => d,
         _ => Path::new("."),
     };
-    let name = path.file_name().ok_or_else(|| anyhow!("config path has no file name"))?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| anyhow!("config path has no file name"))?;
     let metadata = std::fs::metadata(path).context("read config metadata")?;
     let permissions = metadata.permissions();
     let mut tmp_name = std::ffi::OsString::from(".");
@@ -141,7 +159,8 @@ fn write_atomic(path: &Path, contents: &[u8]) -> Result<()> {
                 }
             }
         }
-        file.set_permissions(permissions).context("set temp file permissions")?;
+        file.set_permissions(permissions)
+            .context("set temp file permissions")?;
         file.write_all(contents).context("write temp file")?;
         file.sync_all().context("sync temp file")?;
         drop(file);
@@ -197,7 +216,10 @@ mod tests {
             let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o600);
         }
-        let entries: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect();
+        let entries: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
         assert_eq!(entries, vec![std::ffi::OsString::from("cfg.toml")]);
     }
 
@@ -229,7 +251,10 @@ not toml";
 
         write_atomic(&link, b"new content").unwrap();
 
-        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "new content");
         let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o640);
@@ -243,22 +268,29 @@ not toml";
 
     impl std::ops::Deref for TempDir {
         type Target = std::path::Path;
-        fn deref(&self) -> &std::path::Path { &self.0 }
+        fn deref(&self) -> &std::path::Path {
+            &self.0
+        }
     }
 
     impl AsRef<std::path::Path> for TempDir {
-        fn as_ref(&self) -> &std::path::Path { &self.0 }
+        fn as_ref(&self) -> &std::path::Path {
+            &self.0
+        }
     }
 
     impl Drop for TempDir {
-        fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
     }
 
     fn tempdir_or_panic() -> TempDir {
         use std::sync::atomic::{AtomicU32, Ordering};
         static NEXT: AtomicU32 = AtomicU32::new(0);
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
-        let p = std::env::temp_dir().join(format!("aa-proxy-obd-test-{}-{}", std::process::id(), n));
+        let p =
+            std::env::temp_dir().join(format!("aa-proxy-obd-test-{}-{}", std::process::id(), n));
         let _ = std::fs::remove_dir_all(&p);
         std::fs::create_dir_all(&p).unwrap();
         TempDir(p)

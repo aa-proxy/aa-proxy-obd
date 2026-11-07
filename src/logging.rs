@@ -32,8 +32,22 @@ fn timestamp() -> String {
 /// markup.
 fn is_markup_tag(inner: &str) -> bool {
     const STYLES: &[&str] = &[
-        "bold", "b", "dimmed", "d", "italic", "i", "underline", "u",
-        "blink", "l", "reverse", "r", "hidden", "h", "strikethrough", "s",
+        "bold",
+        "b",
+        "dimmed",
+        "d",
+        "italic",
+        "i",
+        "underline",
+        "u",
+        "blink",
+        "l",
+        "reverse",
+        "r",
+        "hidden",
+        "h",
+        "strikethrough",
+        "s",
     ];
     const COLOURS: &[&str] = &[
         "black", "red", "green", "yellow", "blue", "magenta", "cyan", "white",
@@ -112,7 +126,11 @@ fn resolve_level(log_level: &str, debug_override: bool) -> (LevelFilter, Option<
     }
 }
 
-pub fn init(log_level: &str, log_file: &str, debug_override: bool) -> Result<(), log::SetLoggerError> {
+pub fn init(
+    log_level: &str,
+    log_file: &str,
+    debug_override: bool,
+) -> Result<(), log::SetLoggerError> {
     let (level, level_warning) = resolve_level(log_level, debug_override);
 
     // Console: render markup to colour on an interactive terminal; if stdout is
@@ -120,7 +138,11 @@ pub fn init(log_level: &str, log_file: &str, debug_override: bool) -> Result<(),
     let colorize = std::io::stdout().is_terminal();
     let console = fern::Dispatch::new()
         .format(move |out, message, record| {
-            let line = format!("{} [{}] {message}", timestamp(), level_markup(record.level()));
+            let line = format!(
+                "{} [{}] {message}",
+                timestamp(),
+                level_markup(record.level())
+            );
             out.finish(format_args!("{}", render_console_line(&line, colorize)))
         })
         .chain(std::io::stdout());
@@ -138,7 +160,10 @@ pub fn init(log_level: &str, log_file: &str, debug_override: bool) -> Result<(),
                 .chain(file);
             (dispatch.chain(plain), None)
         }
-        Err(e) => (dispatch, Some(format!("cannot open log file '{}': {}", log_file, e))),
+        Err(e) => (
+            dispatch,
+            Some(format!("cannot open log file '{}': {}", log_file, e)),
+        ),
     };
 
     dispatch.apply()?;
@@ -192,8 +217,14 @@ mod tests {
         let msg = "<b><blue>aa-proxy-obd</> started";
         let colored = render_markup(msg, true);
         let plain = render_markup(msg, false);
-        assert!(colored.contains('\u{1b}'), "console output should contain ANSI codes");
-        assert!(!plain.contains('\u{1b}'), "file output must not contain ANSI codes");
+        assert!(
+            colored.contains('\u{1b}'),
+            "console output should contain ANSI codes"
+        );
+        assert!(
+            !plain.contains('\u{1b}'),
+            "file output must not contain ANSI codes"
+        );
         assert_eq!(plain, "aa-proxy-obd started");
     }
 
@@ -212,7 +243,10 @@ mod tests {
     #[test]
     fn lone_or_spaced_angle_brackets_are_literal() {
         for colorize in [true, false] {
-            assert_eq!(render_markup("a < b and c > d", colorize), "a < b and c > d");
+            assert_eq!(
+                render_markup("a < b and c > d", colorize),
+                "a < b and c > d"
+            );
             assert_eq!(render_markup("ends with <", colorize), "ends with <");
             assert_eq!(render_markup("<< double", colorize), "<< double");
         }

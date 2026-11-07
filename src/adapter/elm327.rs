@@ -7,15 +7,21 @@ use crate::profile::{BroadcastSource, FieldSpec, Source, UdsPidSource, VehiclePr
 use anyhow::{anyhow, Context, Result};
 use log::{debug, trace, warn};
 use std::collections::{HashMap, HashSet};
+use std::io::{Error as IoError, ErrorKind};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use std::io::{Error as IoError, ErrorKind};
 use tokio::time::timeout;
 
 /// Default ELM327 initialisation sequence. A profile may override it via
 /// elm327.init.
 pub const DEFAULT_INIT: &[&str] = &[
-    "ATZ", "ATE0", "ATAL", "ATST96", "ATCP18", "ATFCSD300000", "ATSP6",
+    "ATZ",
+    "ATE0",
+    "ATAL",
+    "ATST96",
+    "ATCP18",
+    "ATFCSD300000",
+    "ATSP6",
 ];
 
 const EOM_PROMPT: u8 = b'>';
@@ -51,7 +57,10 @@ where
     T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     pub fn new(stream: T) -> Self {
-        Self { stream: BufReader::new(stream), out_of_sync: false }
+        Self {
+            stream: BufReader::new(stream),
+            out_of_sync: false,
+        }
     }
 
     /// After a timed-out command its late reply is still in flight: read up to
@@ -79,12 +88,20 @@ where
         debug!("write: {}", String::from_utf8_lossy(&wire));
 
         if let Err(e) = self.stream.write_all(&wire).await {
-            return Err(anyhow::Error::new(IoError::new(e.kind(), format!("write '{cmd}': {e}"))));
+            return Err(anyhow::Error::new(IoError::new(
+                e.kind(),
+                format!("write '{cmd}': {e}"),
+            )));
         }
 
         let mut buf = Vec::new();
 
-        match timeout(SEND_CMD_TIMEOUT, self.stream.read_until(EOM_PROMPT, &mut buf)).await {
+        match timeout(
+            SEND_CMD_TIMEOUT,
+            self.stream.read_until(EOM_PROMPT, &mut buf),
+        )
+        .await
+        {
             Ok(Ok(0)) => Err(anyhow::Error::new(IoError::new(
                 ErrorKind::UnexpectedEof,
                 format!("0 bytes for '{cmd}'"),
@@ -103,10 +120,16 @@ where
                 }
                 Ok(buf)
             }
-            Ok(Err(e)) => Err(anyhow::Error::new(IoError::new(e.kind(), format!("read '{cmd}': {e}")))),
+            Ok(Err(e)) => Err(anyhow::Error::new(IoError::new(
+                e.kind(),
+                format!("read '{cmd}': {e}"),
+            ))),
             Err(_) => {
                 self.out_of_sync = true;
-                Err(anyhow::Error::new(IoError::new(ErrorKind::TimedOut, format!("timeout '{cmd}'"))))
+                Err(anyhow::Error::new(IoError::new(
+                    ErrorKind::TimedOut,
+                    format!("timeout '{cmd}'"),
+                )))
             }
         }
     }
@@ -124,12 +147,16 @@ where
         }
         loop {
             let left = deadline.saturating_duration_since(tokio::time::Instant::now());
-            if left.is_zero() { break; }
+            if left.is_zero() {
+                break;
+            }
             let n = match timeout(quiet.min(left), self.stream.fill_buf()).await {
                 Ok(Ok(b)) => b.len(),
                 _ => break,
             };
-            if n == 0 { break; }
+            if n == 0 {
+                break;
+            }
             self.stream.consume(n);
             trace!("drained {n} bytes");
         }
@@ -141,7 +168,9 @@ where
         let deadline = tokio::time::Instant::now() + max;
         loop {
             let left = deadline.saturating_duration_since(tokio::time::Instant::now());
-            if left.is_zero() { break; }
+            if left.is_zero() {
+                break;
+            }
             let (used, found) = match timeout(left, self.stream.fill_buf()).await {
                 Ok(Ok(b)) if !b.is_empty() => match b.iter().position(|c| *c == EOM_PROMPT) {
                     Some(i) => (i + 1, true),
@@ -150,7 +179,9 @@ where
                 _ => break,
             };
             self.stream.consume(used);
-            if found { return true; }
+            if found {
+                return true;
+            }
         }
         false
     }
@@ -161,32 +192,44 @@ where
     async fn read_line(&mut self, millis: u64) -> std::io::Result<Vec<u8>> {
         let mut out = Vec::new();
         loop {
-            let (used, done) = match timeout(Duration::from_millis(millis), self.stream.fill_buf()).await {
-                Ok(Ok([])) => break,
-                Ok(Ok(b)) => {
-                    let mut used = 0;
-                    let mut done = false;
-                    for &c in b {
-                        used += 1;
-                        if c == b'\r' || c == b'\n' {
-                            if !out.is_empty() { done = true; break; }
-                        } else {
-                            out.push(c);
-                            if out == [EOM_PROMPT] { done = true; break; }
+            let (used, done) =
+                match timeout(Duration::from_millis(millis), self.stream.fill_buf()).await {
+                    Ok(Ok([])) => break,
+                    Ok(Ok(b)) => {
+                        let mut used = 0;
+                        let mut done = false;
+                        for &c in b {
+                            used += 1;
+                            if c == b'\r' || c == b'\n' {
+                                if !out.is_empty() {
+                                    done = true;
+                                    break;
+                                }
+                            } else {
+                                out.push(c);
+                                if out == [EOM_PROMPT] {
+                                    done = true;
+                                    break;
+                                }
+                            }
                         }
+                        (used, done)
                     }
-                    (used, done)
-                }
-                Ok(Err(e)) => return Err(e),
-                Err(_) => {
-                    if out.is_empty() {
-                        return Err(std::io::Error::new(ErrorKind::TimedOut, "line read timeout"));
+                    Ok(Err(e)) => return Err(e),
+                    Err(_) => {
+                        if out.is_empty() {
+                            return Err(std::io::Error::new(
+                                ErrorKind::TimedOut,
+                                "line read timeout",
+                            ));
+                        }
+                        break;
                     }
-                    break;
-                }
-            };
+                };
             self.stream.consume(used);
-            if done { break; }
+            if done {
+                break;
+            }
         }
         Ok(out)
     }
@@ -195,7 +238,8 @@ where
     /// chip drops input while it resets) is retried once after a drain.
     async fn send_ate0(&mut self, cmd: &str) -> Result<()> {
         let acked = |r: &Result<Vec<u8>>| {
-            r.as_ref().is_ok_and(|b| String::from_utf8_lossy(b).contains("OK"))
+            r.as_ref()
+                .is_ok_and(|b| String::from_utf8_lossy(b).contains("OK"))
         };
         if acked(&self.send_cmd(cmd).await) {
             return Ok(());
@@ -227,7 +271,9 @@ where
                 self.send_ate0(cmd).await?;
                 continue;
             }
-            let reply = self.send_cmd(cmd).await
+            let reply = self
+                .send_cmd(cmd)
+                .await
                 .with_context(|| format!("init step '{cmd}' failed"))?;
             if cmd.trim().eq_ignore_ascii_case("ATZ") {
                 let no_banner = String::from_utf8_lossy(&reply)
@@ -251,8 +297,10 @@ where
         check_can_id("ATSH", &uds.ecu_tx)?;
         check_can_id("ATCRA", &uds.ecu_rx)?;
         self.send_header_cmd(&format!("ATSH{}", uds.ecu_tx)).await?;
-        self.send_header_cmd(&format!("ATCRA{}", uds.ecu_rx)).await?;
-        self.send_header_cmd(&format!("ATFCSH{}", uds.ecu_tx)).await?;
+        self.send_header_cmd(&format!("ATCRA{}", uds.ecu_rx))
+            .await?;
+        self.send_header_cmd(&format!("ATFCSH{}", uds.ecu_tx))
+            .await?;
         self.send_cmd("ATFCSD300000").await?;
         self.send_cmd("ATFCSM1").await?;
         // Single-frame parsing expects replies without the CAN-ID prefix.
@@ -263,10 +311,15 @@ where
         }
         let raw = self.send_cmd(&uds.pid).await?;
         let payload = get_payload(&String::from_utf8_lossy(&raw));
-        let service = uds.pid.get(..2).and_then(|s| u8::from_str_radix(s, 16).ok());
+        let service = uds
+            .pid
+            .get(..2)
+            .and_then(|s| u8::from_str_radix(s, 16).ok());
         if let (Some(&0x7F), Some(&svc)) = (payload.first(), payload.get(1)) {
             if service.is_none() || service == Some(svc) {
-                let nrc = payload.get(2).map_or_else(|| "none".to_string(), |n| format!("{n:02X}"));
+                let nrc = payload
+                    .get(2)
+                    .map_or_else(|| "none".to_string(), |n| format!("{n:02X}"));
                 return Err(anyhow::Error::new(std::io::Error::other(format!(
                     "ECU rejected request {}: negative response code {nrc}",
                     uds.pid
@@ -292,8 +345,10 @@ where
         check_can_id("ATCRA", &uds.ecu_rx)?;
 
         self.send_header_cmd(&format!("ATSH{}", uds.ecu_tx)).await?;
-        self.send_header_cmd(&format!("ATCRA{}", uds.ecu_rx)).await?;
-        self.send_header_cmd(&format!("ATFCSH{}", uds.ecu_tx)).await?;
+        self.send_header_cmd(&format!("ATCRA{}", uds.ecu_rx))
+            .await?;
+        self.send_header_cmd(&format!("ATFCSH{}", uds.ecu_tx))
+            .await?;
         self.send_cmd("ATFCSD300000").await?;
         self.send_cmd("ATFCSM1").await?;
         self.send_cmd("ATH0").await?;
@@ -305,10 +360,15 @@ where
         // Send the PID directly (then read lines rather than wait for a prompt).
         self.resync().await?;
         let cmd = format!("{}\r", uds.pid);
-        self.stream.write_all(cmd.as_bytes()).await
+        self.stream
+            .write_all(cmd.as_bytes())
+            .await
             .context("multiframe PID write")?;
 
-        let service = uds.pid.get(..2).and_then(|s| u8::from_str_radix(s, 16).ok());
+        let service = uds
+            .pid
+            .get(..2)
+            .and_then(|s| u8::from_str_radix(s, 16).ok());
 
         let mut lines: Vec<Vec<u8>> = Vec::new();
         let mut saw_prompt = false;
@@ -316,7 +376,9 @@ where
 
         for _ in 0..MAX_REPLY_LINES {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            if remaining.is_zero() { break; }
+            if remaining.is_zero() {
+                break;
+            }
             let wait = REPLY_LINE_TIMEOUT.min(remaining);
             let line = match self.read_line(wait.as_millis().max(1) as u64).await {
                 Ok(l) => l,
@@ -331,14 +393,17 @@ where
                 return Err(anyhow::Error::new(std::io::Error::new(
                     ErrorKind::UnexpectedEof,
                     "link closed",
-                )).context("multiframe read"));
+                ))
+                .context("multiframe read"));
             }
             let trimmed = String::from_utf8_lossy(&line).trim().to_string();
             if trimmed == ">" {
                 saw_prompt = true;
                 break;
             }
-            if trimmed.is_empty() { break; }
+            if trimmed.is_empty() {
+                break;
+            }
             if trimmed.contains("NO DATA") || is_negative_response(&trimmed, service) {
                 // The line ended at its CR; consume the reply's prompt so
                 // ATH0 reads its own reply.
@@ -383,7 +448,8 @@ where
         for cmd in &spec.init {
             if let Err(e) = self.send_cmd(cmd).await {
                 warn!("broadcast init '{cmd}' failed: {e:#}");
-                let timed_out = e.chain()
+                let timed_out = e
+                    .chain()
                     .filter_map(|c| c.downcast_ref::<std::io::Error>())
                     .any(|io| io.kind() == ErrorKind::TimedOut);
                 if timed_out {
@@ -400,8 +466,14 @@ where
         // CAN-IDs whose frame carries a field listed in stop_when. Once a line
         // has arrived for each of them, the wanted data is in hand and the scan
         // can end before the deadline.
-        let needed_ids: HashSet<String> = spec.frames.iter()
-            .filter(|f| f.fields.iter().any(|fld| spec.stop_when.iter().any(|s| s == &fld.name)))
+        let needed_ids: HashSet<String> = spec
+            .frames
+            .iter()
+            .filter(|f| {
+                f.fields
+                    .iter()
+                    .any(|fld| spec.stop_when.iter().any(|s| s == &fld.name))
+            })
             .map(|f| f.can_id.clone())
             .collect();
         let mut seen_ids: HashSet<String> = HashSet::new();
@@ -413,7 +485,9 @@ where
         let mut stray_prompts = 0u32;
 
         self.resync().await?;
-        self.stream.write_all(format!("{}\r", spec.command).as_bytes()).await
+        self.stream
+            .write_all(format!("{}\r", spec.command).as_bytes())
+            .await
             .context("broadcast command write")?;
         let mut consecutive_timeouts: u64 = 0;
 
@@ -453,7 +527,9 @@ where
                             }
                         }
                         lines.push(ascii);
-                        if !needed_ids.is_empty() && needed_ids.iter().all(|id| seen_ids.contains(id)) {
+                        if !needed_ids.is_empty()
+                            && needed_ids.iter().all(|id| seen_ids.contains(id))
+                        {
                             ended_by = "stop_when frames seen";
                             break;
                         }
@@ -476,8 +552,14 @@ where
             "broadcast scan ended by {ended_by} after {} ms, {} lines, {stray_prompts} stray prompt(s), CAN-IDs seen: {ids:?}",
             scan_start.elapsed().as_millis(), lines.len()
         );
-        trace!("broadcast lines (first 20): {:?}", &lines[..lines.len().min(20)]);
-        let mut missing: Vec<&String> = needed_ids.iter().filter(|id| !seen_ids.contains(*id)).collect();
+        trace!(
+            "broadcast lines (first 20): {:?}",
+            &lines[..lines.len().min(20)]
+        );
+        let mut missing: Vec<&String> = needed_ids
+            .iter()
+            .filter(|id| !seen_ids.contains(*id))
+            .collect();
         missing.sort();
         if !missing.is_empty() {
             warn!("broadcast scan ended by {ended_by} without frame(s) {missing:?}");
@@ -574,13 +656,17 @@ fn drop_nulls(buf: &mut Vec<u8>) {
 /// (echo on), comparing case-insensitively and ignoring spaces.
 fn strip_echo(buf: &mut Vec<u8>, cmd: &str) {
     let norm = |b: &[u8]| -> String {
-        String::from_utf8_lossy(b).chars()
+        String::from_utf8_lossy(b)
+            .chars()
             .filter(|c| !c.is_whitespace())
             .collect::<String>()
             .to_ascii_uppercase()
     };
-    let Some(start) = buf.iter().position(|b| !matches!(b, b'\r' | b'\n')) else { return };
-    let end = buf[start..].iter()
+    let Some(start) = buf.iter().position(|b| !matches!(b, b'\r' | b'\n')) else {
+        return;
+    };
+    let end = buf[start..]
+        .iter()
         .position(|b| matches!(b, b'\r' | b'\n'))
         .map_or(buf.len(), |p| start + p);
     if norm(&buf[start..end]) == norm(cmd.as_bytes()) {
@@ -600,7 +686,8 @@ fn hex_bytes(data: &str) -> Vec<u8> {
             .filter_map(|t| u8::from_str_radix(t, 16).ok())
             .collect()
     } else {
-        data.as_bytes().chunks_exact(2)
+        data.as_bytes()
+            .chunks_exact(2)
             .filter_map(|p| std::str::from_utf8(p).ok())
             .filter_map(|p| u8::from_str_radix(p, 16).ok())
             .collect()
@@ -615,7 +702,9 @@ fn hex_bytes(data: &str) -> Vec<u8> {
 // MSRV: avoids APIs newer than Rust 1.80
 #[allow(clippy::unnecessary_map_or)]
 fn is_negative_response(line: &str, service: Option<u8>) -> bool {
-    if line.contains(':') { return false; }
+    if line.contains(':') {
+        return false;
+    }
     matches!(hex_bytes(line.trim()).get(..2), Some([0x7F, s]) if service.map_or(true, |sv| sv == *s))
 }
 
@@ -627,7 +716,8 @@ fn is_negative_response(line: &str, service: Option<u8>) -> bool {
 /// only correct when headers are off (poll_uds_pid sends ATH0). Lines without
 /// spaces (ATS0, e.g. "0:620105FFFB74") are read as consecutive hex pairs.
 pub fn get_payload(response: &str) -> Vec<u8> {
-    let frames: Vec<&str> = response.split(['\r', '\n'])
+    let frames: Vec<&str> = response
+        .split(['\r', '\n'])
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
         .filter(|s| !s.contains("SEARCHING"))
@@ -653,10 +743,14 @@ pub fn get_payload(response: &str) -> Vec<u8> {
 /// Extract a packed value using Motorola/big-endian bit numbering — bit 0 is
 /// the MSB of byte 0. bit_length is 1..=16. Reads contiguously across bytes.
 fn extract_bits(payload: &[u8], bit_offset: u32, bit_length: u32) -> Option<u32> {
-    if bit_length == 0 || bit_length > 16 { return None; }
+    if bit_length == 0 || bit_length > 16 {
+        return None;
+    }
     let last_bit = bit_offset.checked_add(bit_length)?;
     let needed_bytes = last_bit.div_ceil(8) as usize;
-    if needed_bytes > payload.len() { return None; }
+    if needed_bytes > payload.len() {
+        return None;
+    }
 
     let mut acc: u32 = 0;
     for i in 0..bit_length {
@@ -682,20 +776,29 @@ pub fn extract_value(payload: &[u8], field: &FieldSpec) -> Option<f32> {
     }
 
     let byte_index = field.byte_index?;
-    let length     = field.length?;
+    let length = field.length?;
     let idx = if byte_index < 0 {
         let positive = payload.len() as i32 + byte_index;
-        if positive < 0 { return None; }
+        if positive < 0 {
+            return None;
+        }
         positive as usize
     } else {
         // +3 skips the UDS positive-response header (e.g. 62 01 05).
         byte_index.checked_add(3)? as usize
     };
-    if idx.checked_add(length)? > payload.len() { return None; }
+    if idx.checked_add(length)? > payload.len() {
+        return None;
+    }
 
     // Four bytes do not fit an f32 exactly, so scale them in f64.
     if length == 4 {
-        let b = [payload[idx], payload[idx + 1], payload[idx + 2], payload[idx + 3]];
+        let b = [
+            payload[idx],
+            payload[idx + 1],
+            payload[idx + 2],
+            payload[idx + 3],
+        ];
         let raw = if field.signed.unwrap_or(false) {
             i32::from_be_bytes(b) as f64
         } else {
@@ -710,9 +813,11 @@ pub fn extract_value(payload: &[u8], field: &FieldSpec) -> Option<f32> {
             2 => i16::from_be_bytes([payload[idx], payload[idx + 1]]) as f32,
             3 => {
                 let mut v = ((payload[idx] as u32) << 16)
-                          | ((payload[idx + 1] as u32) << 8)
-                          |  (payload[idx + 2] as u32);
-                if v & 0x800000 != 0 { v |= 0xFF000000; }
+                    | ((payload[idx + 1] as u32) << 8)
+                    | (payload[idx + 2] as u32);
+                if v & 0x800000 != 0 {
+                    v |= 0xFF000000;
+                }
                 v as i32 as f32
             }
             _ => return None,
@@ -721,9 +826,11 @@ pub fn extract_value(payload: &[u8], field: &FieldSpec) -> Option<f32> {
         match length {
             1 => payload[idx] as f32,
             2 => u16::from_be_bytes([payload[idx], payload[idx + 1]]) as f32,
-            3 => (((payload[idx] as u32) << 16)
-               | ((payload[idx + 1] as u32) << 8)
-               |  (payload[idx + 2] as u32)) as f32,
+            3 => {
+                (((payload[idx] as u32) << 16)
+                    | ((payload[idx + 1] as u32) << 8)
+                    | (payload[idx + 2] as u32)) as f32
+            }
             _ => return None,
         }
     };
@@ -753,9 +860,13 @@ pub fn assemble_iso_tp(lines: &[Vec<u8>]) -> Option<Vec<u8>> {
                 continue;
             }
         }
-        let data = trimmed.split_once(':').map_or(trimmed, |(_, rest)| rest.trim());
+        let data = trimmed
+            .split_once(':')
+            .map_or(trimmed, |(_, rest)| rest.trim());
         let bytes = hex_bytes(data);
-        if bytes.is_empty() { continue; }
+        if bytes.is_empty() {
+            continue;
+        }
         payload.extend_from_slice(&bytes);
         got_data = true;
         if let Some(exp) = expected_len {
@@ -765,8 +876,12 @@ pub fn assemble_iso_tp(lines: &[Vec<u8>]) -> Option<Vec<u8>> {
             }
         }
     }
-    if !got_data { return None; }
-    if expected_len.is_some_and(|exp| payload.len() < exp) { return None; }
+    if !got_data {
+        return None;
+    }
+    if expected_len.is_some_and(|exp| payload.len() < exp) {
+        return None;
+    }
     Some(payload) // header retained; the field extractor applies its own offset
 }
 
@@ -777,8 +892,12 @@ pub fn route_broadcast_lines(lines: &[String]) -> HashMap<String, Vec<Vec<u8>>> 
     let mut out: HashMap<String, Vec<Vec<u8>>> = HashMap::new();
     for line in lines {
         let trimmed = line.trim();
-        if trimmed.is_empty() { continue; }
-        if trimmed.contains("ERROR") { continue; }
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.contains("ERROR") {
+            continue;
+        }
 
         let mut parts = trimmed.split_whitespace();
         let id = match parts.next() {
@@ -788,7 +907,9 @@ pub fn route_broadcast_lines(lines: &[String]) -> HashMap<String, Vec<Vec<u8>>> 
         let bytes: Vec<u8> = parts
             .filter_map(|t| u8::from_str_radix(t, 16).ok())
             .collect();
-        if bytes.is_empty() { continue; }
+        if bytes.is_empty() {
+            continue;
+        }
         out.entry(id).or_default().push(bytes);
     }
     out
@@ -805,12 +926,16 @@ pub fn extract_value_broadcast(payload: &[u8], field: &FieldSpec) -> Option<f32>
     let length = field.length?;
     let idx = if bi < 0 {
         let positive = payload.len() as i32 + bi;
-        if positive < 0 { return None; }
+        if positive < 0 {
+            return None;
+        }
         positive as usize
     } else {
         bi as usize
     };
-    if idx.checked_add(length)? > payload.len() { return None; }
+    if idx.checked_add(length)? > payload.len() {
+        return None;
+    }
     let raw = if field.signed.unwrap_or(false) {
         match length {
             1 => payload[idx] as i8 as f32,
@@ -836,13 +961,23 @@ mod tests {
         // Zoe 2233DE answer from a real car log: 62 33 DE 00 96 86 C4.
         let p = [0x62, 0x33, 0xDE, 0x00, 0x96, 0x86, 0xC4];
         let f = FieldSpec {
-            name: "trip_km".into(), byte_index: Some(-4), length: Some(4),
-            bit_offset: None, bit_length: None,
-            multiplier: 0.0001, offset: 0.0, signed: None, enabled: true,
+            name: "trip_km".into(),
+            byte_index: Some(-4),
+            length: Some(4),
+            bit_offset: None,
+            bit_length: None,
+            multiplier: 0.0001,
+            offset: 0.0,
+            signed: None,
+            enabled: true,
         };
         assert_eq!(extract_value(&p, &f), Some(986.49));
         let neg = [0x62, 0x33, 0xDE, 0xFF, 0xFF, 0xFF, 0xFE];
-        let f3 = FieldSpec { signed: Some(true), multiplier: 1.0, ..f };
+        let f3 = FieldSpec {
+            signed: Some(true),
+            multiplier: 1.0,
+            ..f
+        };
         assert_eq!(extract_value(&neg, &f3), Some(-2.0));
     }
 
@@ -851,9 +986,15 @@ mod tests {
         let mut payload = vec![0u8; 32];
         payload[8] = 134;
         let f = FieldSpec {
-            name: "soc".into(), byte_index: Some(5), length: Some(1),
-            bit_offset: None, bit_length: None,
-            multiplier: 0.5, offset: 0.0, signed: None, enabled: true,
+            name: "soc".into(),
+            byte_index: Some(5),
+            length: Some(1),
+            bit_offset: None,
+            bit_length: None,
+            multiplier: 0.5,
+            offset: 0.0,
+            signed: None,
+            enabled: true,
         };
         assert_eq!(extract_value(&payload, &f), Some(67.0));
     }
@@ -863,9 +1004,15 @@ mod tests {
         let mut payload = vec![0u8; 16];
         payload[3] = 0xF6;
         let f = FieldSpec {
-            name: "delta".into(), byte_index: Some(0), length: Some(1),
-            bit_offset: None, bit_length: None,
-            multiplier: 1.0, offset: 0.0, signed: Some(true), enabled: true,
+            name: "delta".into(),
+            byte_index: Some(0),
+            length: Some(1),
+            bit_offset: None,
+            bit_length: None,
+            multiplier: 1.0,
+            offset: 0.0,
+            signed: Some(true),
+            enabled: true,
         };
         assert_eq!(extract_value(&payload, &f), Some(-10.0));
     }
@@ -874,9 +1021,15 @@ mod tests {
     fn extract_negative_byte_index_from_end() {
         let payload = vec![0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00, 0x11, 0x22];
         let f = FieldSpec {
-            name: "x".into(), byte_index: Some(-3), length: Some(3),
-            bit_offset: None, bit_length: None,
-            multiplier: 1.0, offset: 0.0, signed: None, enabled: true,
+            name: "x".into(),
+            byte_index: Some(-3),
+            length: Some(3),
+            bit_offset: None,
+            bit_length: None,
+            multiplier: 1.0,
+            offset: 0.0,
+            signed: None,
+            enabled: true,
         };
         assert_eq!(extract_value(&payload, &f), Some(4386.0));
     }
@@ -885,9 +1038,15 @@ mod tests {
     fn extract_out_of_bounds_returns_none() {
         let payload = vec![0u8; 4];
         let f = FieldSpec {
-            name: "x".into(), byte_index: Some(10), length: Some(1),
-            bit_offset: None, bit_length: None,
-            multiplier: 1.0, offset: 0.0, signed: None, enabled: true,
+            name: "x".into(),
+            byte_index: Some(10),
+            length: Some(1),
+            bit_offset: None,
+            bit_length: None,
+            multiplier: 1.0,
+            offset: 0.0,
+            signed: None,
+            enabled: true,
         };
         assert_eq!(extract_value(&payload, &f), None);
     }
@@ -974,9 +1133,15 @@ mod tests {
         let mut p = vec![0u8; 6];
         p[3] = 0b1000_0000; // first data byte, MSB set
         let f = FieldSpec {
-            name: "x".into(), byte_index: None, length: None,
-            bit_offset: Some(0), bit_length: Some(1),
-            multiplier: 1.0, offset: 0.0, signed: None, enabled: true,
+            name: "x".into(),
+            byte_index: None,
+            length: None,
+            bit_offset: Some(0),
+            bit_length: Some(1),
+            multiplier: 1.0,
+            offset: 0.0,
+            signed: None,
+            enabled: true,
         };
         assert_eq!(extract_value(&p, &f), Some(1.0));
     }
@@ -1007,7 +1172,13 @@ mod tests {
             b"2: 2F 00 00".to_vec(),
         ];
         let p = assemble_iso_tp(&lines).expect("payload");
-        assert_eq!(p, vec![0x61, 0x74, 0x11, 0x22, 0x33, 0x44, 0x21, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0x2F, 0x00, 0x00]);
+        assert_eq!(
+            p,
+            vec![
+                0x61, 0x74, 0x11, 0x22, 0x33, 0x44, 0x21, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0x2F,
+                0x00, 0x00
+            ]
+        );
     }
 
     #[test]
@@ -1025,9 +1196,15 @@ mod tests {
     fn extract_value_overflowing_offsets_return_none() {
         let p = vec![0u8; 8];
         let mut f = FieldSpec {
-            name: "x".into(), byte_index: Some(i32::MAX - 1), length: Some(1),
-            bit_offset: None, bit_length: None,
-            multiplier: 1.0, offset: 0.0, signed: None, enabled: true,
+            name: "x".into(),
+            byte_index: Some(i32::MAX - 1),
+            length: Some(1),
+            bit_offset: None,
+            bit_length: None,
+            multiplier: 1.0,
+            offset: 0.0,
+            signed: None,
+            enabled: true,
         };
         assert_eq!(extract_value(&p, &f), None);
         assert_eq!(extract_value_broadcast(&p, &f), None);
@@ -1041,7 +1218,11 @@ mod tests {
 
     #[test]
     fn assemble_iso_tp_short_reply_is_incomplete() {
-        let lines = vec![b"014".to_vec(), b"0: 61 74 00 01 02 03".to_vec(), b"1: 04 05 06 07 08 09 0A".to_vec()];
+        let lines = vec![
+            b"014".to_vec(),
+            b"0: 61 74 00 01 02 03".to_vec(),
+            b"1: 04 05 06 07 08 09 0A".to_vec(),
+        ];
         assert!(assemble_iso_tp(&lines).is_none());
     }
 
@@ -1053,7 +1234,10 @@ mod tests {
             b"1:2001020304050607".to_vec(),
         ];
         let p = assemble_iso_tp(&lines).expect("payload");
-        assert_eq!(p, vec![0x7F, 0x21, 0x12, 0xAA, 0xBB, 0xCC, 0x20, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06]);
+        assert_eq!(
+            p,
+            vec![0x7F, 0x21, 0x12, 0xAA, 0xBB, 0xCC, 0x20, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06]
+        );
     }
 
     #[test]
@@ -1076,9 +1260,11 @@ mod tests {
         assert_eq!(frames.get("673").map(|v| v.len()), Some(2));
         assert_eq!(frames.get("656").map(|v| v.len()), Some(2));
         assert_eq!(frames["673"][0], vec![0x11, 0x22, 0x33, 0x44, 0x55, 0x66]);
-        assert_eq!(frames["656"][1], vec![0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10]);
+        assert_eq!(
+            frames["656"][1],
+            vec![0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10]
+        );
     }
-
 
     #[tokio::test(start_paused = true)]
     async fn send_cmd_reports_eof_as_a_lost_link() {

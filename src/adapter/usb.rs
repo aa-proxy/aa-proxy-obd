@@ -20,7 +20,12 @@ pub struct UsbElm327Adapter {
 
 impl UsbElm327Adapter {
     pub fn new(port: &str, baud: u32, profile: VehicleProfile) -> anyhow::Result<Self> {
-        Ok(Self { port: port.into(), baud, profile, session: None })
+        Ok(Self {
+            port: port.into(),
+            baud,
+            profile,
+            session: None,
+        })
     }
 }
 
@@ -33,20 +38,28 @@ impl Adapter for UsbElm327Adapter {
             .open_native_async()
             .map_err(|e| AdapterError::FatalConn(anyhow!("open {}: {e}", self.port)))?;
 
-        let init: Vec<String> = self.profile.elm327.as_ref()
+        let init: Vec<String> = self
+            .profile
+            .elm327
+            .as_ref()
             .and_then(|e| e.init.clone())
             .unwrap_or_else(|| DEFAULT_INIT.iter().map(|s| s.to_string()).collect());
         let init_refs: Vec<&str> = init.iter().map(String::as_str).collect();
 
         let mut session = Elm327Session::new(stream);
-        session.run_init(&init_refs).await.map_err(AdapterError::FatalConn)?;
+        session
+            .run_init(&init_refs)
+            .await
+            .map_err(AdapterError::FatalConn)?;
         self.session = Some(session);
         info!("USB ELM327 initialised");
         Ok(())
     }
 
     async fn poll(&mut self) -> Result<Metrics, AdapterError> {
-        let session = self.session.as_mut()
+        let session = self
+            .session
+            .as_mut()
             .ok_or_else(|| AdapterError::FatalConn(anyhow!("not connected")))?;
 
         poll_sources(session, &self.profile).await

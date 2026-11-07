@@ -35,7 +35,7 @@ impl std::fmt::Display for AdapterError {
         match self {
             AdapterError::Transient(e) => write!(f, "transient: {e:#}"),
             AdapterError::FatalConn(e) => write!(f, "fatal-conn: {e:#}"),
-            AdapterError::Sleeping     => write!(f, "sleeping"),
+            AdapterError::Sleeping => write!(f, "sleeping"),
         }
     }
 }
@@ -140,7 +140,11 @@ mod tests {
             ErrorKind::UnexpectedEof,
         ];
         for k in fatal {
-            assert_eq!(kind_of(anyhow::Error::new(IoError::new(k, "x"))), "fatal", "{k:?}");
+            assert_eq!(
+                kind_of(anyhow::Error::new(IoError::new(k, "x"))),
+                "fatal",
+                "{k:?}"
+            );
         }
         let e = anyhow::Error::new(IoError::new(ErrorKind::AddrNotAvailable, "x"));
         assert_eq!(kind_of(e), "sleeping");
@@ -177,7 +181,10 @@ mod tests {
 
     #[test]
     fn error_without_io_cause_is_transient() {
-        assert_eq!(kind_of(anyhow::anyhow!("UDS error response: NO DATA")), "transient");
+        assert_eq!(
+            kind_of(anyhow::anyhow!("UDS error response: NO DATA")),
+            "transient"
+        );
     }
 
     #[cfg(target_os = "linux")]

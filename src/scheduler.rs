@@ -17,12 +17,15 @@ use tokio::time::Instant;
 /// if shutdown has already been triggered, otherwise parks until it is.
 pub struct Shutdown {
     running: AtomicBool,
-    notify:  Notify,
+    notify: Notify,
 }
 
 impl Shutdown {
     pub fn new() -> Self {
-        Self { running: AtomicBool::new(true), notify: Notify::new() }
+        Self {
+            running: AtomicBool::new(true),
+            notify: Notify::new(),
+        }
     }
 
     pub fn is_running(&self) -> bool {
@@ -49,7 +52,9 @@ impl Shutdown {
 }
 
 impl Default for Shutdown {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Returns true if the cycle-health watchdog should fire.
@@ -70,7 +75,11 @@ pub struct WatchdogTripped {
 
 impl std::fmt::Display for WatchdogTripped {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "watchdog tripped after {} consecutive failed cycles", self.cycles)
+        write!(
+            f,
+            "watchdog tripped after {} consecutive failed cycles",
+            self.cycles
+        )
     }
 }
 
@@ -82,11 +91,19 @@ pub async fn run(
     publisher: Publisher,
     shutdown: Arc<Shutdown>,
 ) -> anyhow::Result<()> {
-    let poll_interval = Duration::try_from_secs_f32(daemon.poll_interval_secs)
-        .map_err(|e| anyhow::anyhow!("invalid daemon.poll_interval_secs {}: {e}", daemon.poll_interval_secs))?;
-    let sleep_interval = Duration::try_from_secs_f32(daemon.car_sleep_interval_secs).map_err(|e| {
-        anyhow::anyhow!("invalid daemon.car_sleep_interval_secs {}: {e}", daemon.car_sleep_interval_secs)
+    let poll_interval = Duration::try_from_secs_f32(daemon.poll_interval_secs).map_err(|e| {
+        anyhow::anyhow!(
+            "invalid daemon.poll_interval_secs {}: {e}",
+            daemon.poll_interval_secs
+        )
     })?;
+    let sleep_interval =
+        Duration::try_from_secs_f32(daemon.car_sleep_interval_secs).map_err(|e| {
+            anyhow::anyhow!(
+                "invalid daemon.car_sleep_interval_secs {}: {e}",
+                daemon.car_sleep_interval_secs
+            )
+        })?;
     let mut poll_deadline = Instant::now();
     let mut no_publish_cycles: u32 = 0;
     let limit = daemon.cycle_failure_limit;
@@ -109,7 +126,9 @@ pub async fn run(
             Err(_) => {
                 warn!("connect timed out after {:?}", connect_bound);
                 adapter.disconnect().await;
-                Err(AdapterError::FatalConn(anyhow::anyhow!("connect timed out")))
+                Err(AdapterError::FatalConn(anyhow::anyhow!(
+                    "connect timed out"
+                )))
             }
         };
         if let Err(e) = connect_res {
@@ -162,11 +181,20 @@ pub async fn run(
                     } else {
                         no_publish_cycles += 1;
                         if watchdog_should_fire(no_publish_cycles, limit) {
-                            error!("watchdog tripped: {} consecutive cycles produced no data; exiting", no_publish_cycles);
+                            error!(
+                                "watchdog tripped: {} consecutive cycles produced no data; exiting",
+                                no_publish_cycles
+                            );
                             adapter.disconnect().await;
-                            return Err(WatchdogTripped { cycles: no_publish_cycles }.into());
+                            return Err(WatchdogTripped {
+                                cycles: no_publish_cycles,
+                            }
+                            .into());
                         }
-                        warn!("no data collected this cycle ({}/{})", no_publish_cycles, limit);
+                        warn!(
+                            "no data collected this cycle ({}/{})",
+                            no_publish_cycles, limit
+                        );
                     }
                     poll_deadline = Instant::now() + poll_interval;
                 }
@@ -176,12 +204,18 @@ pub async fn run(
                     if watchdog_should_fire(no_publish_cycles, limit) {
                         error!("watchdog tripped on transient errors; exiting");
                         adapter.disconnect().await;
-                        return Err(WatchdogTripped { cycles: no_publish_cycles }.into());
+                        return Err(WatchdogTripped {
+                            cycles: no_publish_cycles,
+                        }
+                        .into());
                     }
                     poll_deadline = Instant::now() + poll_interval;
                 }
                 Err(AdapterError::FatalConn(e)) => {
-                    info!("connection lost: {e:#}; reconnecting in {:?}", poll_interval);
+                    info!(
+                        "connection lost: {e:#}; reconnecting in {:?}",
+                        poll_interval
+                    );
                     adapter.disconnect().await;
                     tokio::select! {
                         biased;
@@ -251,7 +285,10 @@ mod tests {
     #[async_trait::async_trait]
     impl Adapter for Mock {
         async fn connect(&mut self) -> Result<(), AdapterError> {
-            self.events.lock().unwrap().push(("connect", Instant::now()));
+            self.events
+                .lock()
+                .unwrap()
+                .push(("connect", Instant::now()));
             if self.connect_never {
                 std::future::pending::<()>().await;
             }
@@ -266,7 +303,10 @@ mod tests {
             }
         }
         async fn disconnect(&mut self) {
-            self.events.lock().unwrap().push(("disconnect", Instant::now()));
+            self.events
+                .lock()
+                .unwrap()
+                .push(("disconnect", Instant::now()));
         }
     }
 
@@ -274,9 +314,17 @@ mod tests {
         polls: Vec<Step>,
         connect_never: bool,
         limit: u32,
-    ) -> (Events, Arc<Shutdown>, tokio::task::JoinHandle<anyhow::Result<()>>) {
+    ) -> (
+        Events,
+        Arc<Shutdown>,
+        tokio::task::JoinHandle<anyhow::Result<()>>,
+    ) {
         let events: Events = Arc::new(Mutex::new(Vec::new()));
-        let mock = Mock { events: events.clone(), polls: polls.into(), connect_never };
+        let mock = Mock {
+            events: events.clone(),
+            polls: polls.into(),
+            connect_never,
+        };
         let daemon = DaemonSection {
             poll_interval_secs: 10.0,
             cycle_failure_limit: limit,
@@ -300,7 +348,11 @@ mod tests {
         sd.trigger();
         h.await.unwrap().expect("clean shutdown is Ok");
         let ev = events.lock().unwrap();
-        let connects: Vec<Instant> = ev.iter().filter(|e| e.0 == "connect").map(|e| e.1).collect();
+        let connects: Vec<Instant> = ev
+            .iter()
+            .filter(|e| e.0 == "connect")
+            .map(|e| e.1)
+            .collect();
         assert!(connects.len() > 20, "{}", connects.len());
         for w in connects.windows(2) {
             assert!(w[1] - w[0] >= Duration::from_secs(10), "{:?}", w[1] - w[0]);
@@ -327,7 +379,14 @@ mod tests {
         let t0 = ev[0].1;
         assert_eq!(
             ev.iter().map(|e| e.0).collect::<Vec<_>>(),
-            ["connect", "poll", "disconnect", "connect", "poll", "disconnect"]
+            [
+                "connect",
+                "poll",
+                "disconnect",
+                "connect",
+                "poll",
+                "disconnect"
+            ]
         );
         assert_eq!(ev[2].1 - t0, POLL_TIMEOUT);
         assert!(ev[3].1 - ev[2].1 >= Duration::from_secs(10));
@@ -361,7 +420,9 @@ mod tests {
     async fn shutdown_wait_resolves_when_triggered_concurrently() {
         let s = Arc::new(Shutdown::new());
         let s2 = s.clone();
-        let waiter = tokio::spawn(async move { s2.wait().await; });
+        let waiter = tokio::spawn(async move {
+            s2.wait().await;
+        });
         // Give the waiter a tick to register interest.
         tokio::task::yield_now().await;
         s.trigger();
