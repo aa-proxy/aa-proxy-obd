@@ -157,7 +157,7 @@ impl VehicleProfile {
                         ));
                     }
                     for f in &s.fields {
-                        check_field(&ctx, f, 3)?;
+                        check_field(&ctx, f, 4)?;
                     }
                 }
                 Source::Broadcast(b) => {
@@ -350,8 +350,8 @@ mod tests {
             (r#"{"name":"f"}"#, "byte_index+length or bit_offset"),
                         (r#"{"name":"f","byte_index":1}"#, "together"),
             (r#"{"name":"f","bit_offset":1}"#, "together"),
-            (r#"{"name":"f","byte_index":1,"length":0}"#, "length must be 1..=3"),
-            (r#"{"name":"f","byte_index":1,"length":4}"#, "length must be 1..=3"),
+            (r#"{"name":"f","byte_index":1,"length":0}"#, "length must be 1..=4"),
+            (r#"{"name":"f","byte_index":1,"length":5}"#, "length must be 1..=4"),
             (r#"{"name":"f","bit_offset":1,"bit_length":0}"#, "bit_length must be 1..=16"),
             (r#"{"name":"f","bit_offset":1,"bit_length":17}"#, "bit_length must be 1..=16"),
         ];
@@ -363,6 +363,7 @@ mod tests {
         let both = r#"{"name":"f","byte_index":1,"length":1,"bit_offset":0,"bit_length":1}"#;
         with_source(both, OK_HEAD).unwrap();
         with_source(r#"{"name":"f","byte_index":-2,"length":3}"#, OK_HEAD).unwrap();
+        with_source(r#"{"name":"f","byte_index":-4,"length":4}"#, OK_HEAD).unwrap();
     }
 
     fn broadcast(deadline: u64, idle: u64, can_id: &str) -> Result<(), String> {

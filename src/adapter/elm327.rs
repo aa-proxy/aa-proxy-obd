@@ -689,6 +689,17 @@ pub fn extract_value(payload: &[u8], field: &FieldSpec) -> Option<f32> {
     };
     if idx.checked_add(length)? > payload.len() { return None; }
 
+    // Four bytes do not fit an f32 exactly, so scale them in f64.
+    if length == 4 {
+        let b = [payload[idx], payload[idx + 1], payload[idx + 2], payload[idx + 3]];
+        let raw = if field.signed.unwrap_or(false) {
+            i32::from_be_bytes(b) as f64
+        } else {
+            u32::from_be_bytes(b) as f64
+        };
+        return Some((raw * field.multiplier as f64 + field.offset as f64) as f32);
+    }
+
     let raw = if field.signed.unwrap_or(false) {
         match length {
             1 => payload[idx] as i8 as f32,
@@ -815,6 +826,21 @@ pub fn extract_value_broadcast(payload: &[u8], field: &FieldSpec) -> Option<f32>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extract_four_byte_value_from_the_end() {
+        // Zoe 2233DE answer from a real car log: 62 33 DE 00 96 86 C4.
+        let p = [0x62, 0x33, 0xDE, 0x00, 0x96, 0x86, 0xC4];
+        let f = FieldSpec {
+            name: "trip_km".into(), byte_index: Some(-4), length: Some(4),
+            bit_offset: None, bit_length: None,
+            multiplier: 0.0001, offset: 0.0, signed: None, enabled: true,
+        };
+        assert_eq!(extract_value(&p, &f), Some(986.49));
+        let neg = [0x62, 0x33, 0xDE, 0xFF, 0xFF, 0xFF, 0xFE];
+        let f3 = FieldSpec { signed: Some(true), multiplier: 1.0, ..f };
+        assert_eq!(extract_value(&neg, &f3), Some(-2.0));
+    }
 
     #[test]
     fn extract_unsigned_byte_with_multiplier_and_offset() {
