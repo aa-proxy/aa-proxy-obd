@@ -336,6 +336,15 @@ fn zoe_tpms_payload(tires: [u8; 4]) -> String {
     b.iter().map(|x| format!("{x:02X}")).collect()
 }
 
+/// Zoe 2104 reply from the battery ECU. The first bytes are from a real car log
+/// (61 04 09 99 37 09: byte 4 is 0x37, 15 degrees); the rest is filler up to the
+/// real reply length of 0x4D bytes.
+fn zoe_lbc_payload() -> String {
+    let mut b = vec![0x61, 0x04, 0x09, 0x99, 0x37, 0x09];
+    b.resize(0x4D, 0x00);
+    b.iter().map(|x| format!("{x:02X}")).collect()
+}
+
 /// Run two full Zoe cycles over the uds sources. Replies are rebuilt from the
 /// values a 2026-05-29 Renault Zoe log shows (SOC 51.96 %, 10705 Wh,
 /// 136452 km); the raw bytes are derived, not recorded.
@@ -348,7 +357,13 @@ async fn zoe_cycle(cfg: EmuConfig, tires: [u8; 4]) -> (Vec<(String, Result<Metri
             .respond_payload("222002", "62 20 02 0A 26")
             .respond_payload("222006", "62 20 06 02 15 04")
             .respond_payload("22320C", "62 32 0C 08 5D")
-            .respond_payload("223451", "62 34 51 00 1E"),
+            .respond_payload("223451", "62 34 51 00 1E")
+            .respond_payload("2233DD", "62 33 DD 02 2C 3F")
+            .respond_payload("2233DE", "62 33 DE 00 96 86 C4"),
+        // Battery ECU: 2104 is a long reply; the real one starts 61 04 09 99 37 09.
+        Ecu::new(0x79B, 0x7BB)
+            .respond_payload("10C0", "50 C0")
+            .respond_payload("2104", &zoe_lbc_payload()),
     ];
     let p = profile("zoe");
     let init = profile_init(&p);
@@ -374,6 +389,10 @@ fn zoe_expected(tires: [u8; 4]) -> Vec<(String, HashMap<String, f32>)> {
         ("22320C".to_string(), [("battery_level_wh".to_string(), 10705.0)].into()),
         // From a real car log: 223451 answered 62 34 51 00 1E at 24.28 % SOC.
         ("223451".to_string(), [("range_km".to_string(), 30.0)].into()),
+        // From a real car log (62 33 DD 02 2C 3F, 62 33 DE 00 96 86 C4).
+        ("2233DD".to_string(), [("trip_energy_kwh".to_string(), 142.399)].into()),
+        ("2233DE".to_string(), [("trip_km".to_string(), 986.49)].into()),
+        ("2104".to_string(), [("battery_module_1_temp_celsius".to_string(), 15.0)].into()),
         ("2174".to_string(), [("tire_rr_kpa".to_string(), t(tires[0])), ("tire_rl_kpa".to_string(), t(tires[1])),
          ("tire_fr_kpa".to_string(), t(tires[2])), ("tire_fl_kpa".to_string(), t(tires[3]))].into()),
     ];
