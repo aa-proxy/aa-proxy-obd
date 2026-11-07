@@ -745,7 +745,7 @@ async fn poll_sources_reports_link_closed_during_multiframe() {
             if byte[0] != b'\r' { pending.push(byte[0]); continue; }
             let cmd = String::from_utf8_lossy(&pending).into_owned();
             pending.clear();
-            if cmd.starts_with("AT") {
+            if cmd.starts_with("AT") || cmd == "10C0" {
                 if peer.write_all(b"OK\r\r>").await.is_err() { return; }
             } else {
                 let _ = peer.write_all(b"7EC 10 08 62 20 02 0A\r").await;
@@ -761,6 +761,30 @@ async fn poll_sources_reports_link_closed_during_multiframe() {
         }
         other => panic!("expected FatalConn, got {other:?}"),
     }
+}
+
+/// A multiframe source sends its pre_request before the PID, as a
+/// single-frame one does.
+#[tokio::test(start_paused = true)]
+async fn multiframe_sends_the_pre_request_before_the_pid() {
+    let ecus = vec![
+        Ecu::new(0x79B, 0x7BB)
+            .respond_payload("10C0", "50 C0")
+            .respond_payload("2104", "61 04 09 99 37 09 00 00 00 00 00 00 00 00 00 00 00 00 00"),
+    ];
+    let (host, log) = emu::spawn(EmuConfig::default(), ecus);
+    let mut s = Elm327Session::new(host);
+    s.run_init(&profile_init(&profile("zoe"))).await.unwrap();
+    let src = UdsPidSource {
+        ecu_tx: "79B".into(), ecu_rx: "7BB".into(), pid: "2104".into(),
+        pre_request: Some("10C0".into()), multiframe: true, fields: vec![],
+    };
+    let payload = s.poll_uds_pid_multiframe(&src).await.unwrap();
+    assert_eq!(&payload[..6], &[0x61, 0x04, 0x09, 0x99, 0x37, 0x09]);
+    let sent: Vec<String> = log.lock().unwrap().iter().map(|(c, _)| c.clone()).collect();
+    let pre = sent.iter().position(|c| c == "10C0").expect("10C0 not sent");
+    let pid = sent.iter().position(|c| c == "2104").expect("2104 not sent");
+    assert!(pre < pid, "{sent:?}");
 }
 
 /// A field with `enabled: false` is not extracted; the other fields of the
