@@ -251,7 +251,13 @@ cargo build --release
 ```
 The vendored [`.cargo/config.toml`](.cargo/config.toml) defaults the target to `aarch64-unknown-linux-gnu` so the release build cross-compiles for common SBCs (e.g. Radxa Zero 3W running an [aa-proxy-rs](https://github.com/aa-proxy/aa-proxy-rs) image). Run the test suite on the host with `cargo test --target <host-triple>`.
 
-Every push to `main` and every pull request against `main` runs [`.github/workflows/build.yml`](.github/workflows/build.yml): the tests on x86_64 Linux, then the aarch64 release build, uploaded as the `aa-proxy-obd-aarch64-unknown-linux-gnu` artifact of the run. The workflow can also be started by hand from the Actions tab.
+The code is formatted with `cargo fmt`. To check it before each commit, enable the repository's hooks once per clone:
+```sh
+git config core.hooksPath .githooks
+```
+The [`pre-commit`](.githooks/pre-commit) hook then stops a commit with unformatted code and formats it, so you can review and stage the changes.
+
+Every push to `main` and every pull request against `main` runs [`.github/workflows/build.yml`](.github/workflows/build.yml): the formatting check, the tests on x86_64 Linux, then the aarch64 release build, uploaded as the `aa-proxy-obd-aarch64-unknown-linux-gnu` artifact of the run. The workflow can also be started by hand from the Actions tab.
 
 ## License
 GPL-2.0-only. See [`LICENSE`](LICENSE).
