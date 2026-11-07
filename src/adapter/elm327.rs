@@ -297,6 +297,10 @@ where
         self.send_cmd("ATFCSD300000").await?;
         self.send_cmd("ATFCSM1").await?;
         self.send_cmd("ATH0").await?;
+        if let Some(pre) = &uds.pre_request {
+            // As in poll_uds_pid, errors are ignored.
+            let _ = self.send_cmd(pre).await;
+        }
 
         // Send the PID directly (then read lines rather than wait for a prompt).
         self.resync().await?;
