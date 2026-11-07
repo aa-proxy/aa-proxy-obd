@@ -46,6 +46,37 @@
     },
     {
       "kind": "uds_pid",
+      "ecu_tx": "7E4",
+      "ecu_rx": "7EC",
+      "pid": "2233DD",
+      "pre_request": "10C0",
+      "fields": [
+        {"name": "trip_energy_kwh", "byte_index": -3, "length": 3, "multiplier": 0.001, "offset": 0.0}
+      ]
+    },
+    {
+      "kind": "uds_pid",
+      "ecu_tx": "7E4",
+      "ecu_rx": "7EC",
+      "pid": "2233DE",
+      "pre_request": "10C0",
+      "fields": [
+        {"name": "trip_km", "byte_index": -4, "length": 4, "multiplier": 0.0001, "offset": 0.0}
+      ]
+    },
+    {
+      "kind": "uds_pid",
+      "ecu_tx": "79B",
+      "ecu_rx": "7BB",
+      "pid": "2104",
+      "pre_request": "10C0",
+      "multiframe": true,
+      "fields": [
+        {"name": "battery_module_1_temp_celsius", "byte_index": 1, "length": 1, "multiplier": 1.0, "offset": -40.0}
+      ]
+    },
+    {
+      "kind": "uds_pid",
       "ecu_tx": "745",
       "ecu_rx": "765",
       "pid": "2174",
