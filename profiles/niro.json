@@ -5,9 +5,18 @@
       "kind": "uds_pid",
       "ecu_tx": "7E4",
       "ecu_rx": "7EC",
+      "pid": "220105",
+      "fields": [
+        {"name": "battery_level_percentage", "byte_index": 31, "length": 1, "multiplier": 0.5, "offset": 0.0},
+        {"name": "battery_state_of_health", "byte_index": 25, "length": 2, "multiplier": 0.1, "offset": 0.0}
+      ]
+    },
+    {
+      "kind": "uds_pid",
+      "ecu_tx": "7E4",
+      "ecu_rx": "7EC",
       "pid": "220101",
       "fields": [
-        {"name": "battery_level_percentage", "byte_index": 4, "length": 1, "multiplier": 0.5, "offset": 0.0},
         {"name": "battery_voltage", "byte_index": 12, "length": 2, "multiplier": 0.1, "offset": 0.0},
         {"name": "battery_current", "byte_index": 10, "length": 2, "multiplier": 0.1, "offset": 0.0, "signed": true},
         {"name": "aux_battery_voltage", "byte_index": 29, "length": 1, "multiplier": 0.1, "offset": 0.0},
@@ -17,6 +26,7 @@
         {"name": "battery_module_2_temp_celsius", "byte_index": 17, "length": 1, "multiplier": 1.0, "offset": 0.0, "signed": true},
         {"name": "battery_module_3_temp_celsius", "byte_index": 18, "length": 1, "multiplier": 1.0, "offset": 0.0, "signed": true},
         {"name": "battery_module_4_temp_celsius", "byte_index": 19, "length": 1, "multiplier": 1.0, "offset": 0.0, "signed": true},
+        {"name": "motor_rpm", "byte_index": 55, "length": 2, "multiplier": 1.0, "offset": 0.0, "signed": true},
         {"name": "battery_inlet_temp_celsius", "byte_index": 22, "length": 1, "multiplier": 1.0, "offset": 0.0, "signed": true, "enabled": false},
         {"name": "isolation_resistance_kohm", "byte_index": 57, "length": 2, "multiplier": 1.0, "offset": 0.0, "enabled": false},
         {"name": "cell_voltage_max", "byte_index": 23, "length": 1, "multiplier": 0.02, "offset": 0.0, "enabled": false},
@@ -27,6 +37,43 @@
         {"name": "dc_plug_flag", "bit_offset": 73, "bit_length": 1, "enabled": false},
         {"name": "ac_plug_flag", "bit_offset": 74, "bit_length": 1, "enabled": false},
         {"name": "main_relay_flag", "bit_offset": 79, "bit_length": 1, "enabled": false}
+      ]
+    },
+    {
+      "kind": "uds_pid",
+      "ecu_tx": "7B3",
+      "ecu_rx": "7BB",
+      "pid": "220100",
+      "fields": [
+        {"name": "external_temp_celsius", "byte_index": 6, "length": 1, "multiplier": 0.5, "offset": -40.0},
+        {"name": "interior_temp_celsius", "byte_index": 5, "length": 1, "multiplier": 0.5, "offset": -40.0},
+        {"name": "speed_kmh", "byte_index": 29, "length": 1, "multiplier": 1.0, "offset": 0.0}
+      ]
+    },
+    {
+      "kind": "uds_pid",
+      "ecu_tx": "7C6",
+      "ecu_rx": "7CE",
+      "pid": "22B002",
+      "fields": [
+        {"name": "odometer_km", "byte_index": 6, "length": 3, "multiplier": 1.0, "offset": 0.0},
+        {"name": "odometer_mi", "byte_index": 9, "length": 3, "multiplier": 1.0, "offset": 0.0}
+      ]
+    },
+    {
+      "kind": "uds_pid",
+      "ecu_tx": "7A0",
+      "ecu_rx": "7A8",
+      "pid": "22C00B",
+      "fields": [
+        {"name": "tire_fl_kpa", "byte_index": 4,  "length": 1, "multiplier": 1.37895, "offset": 0.0},
+        {"name": "tire_fr_kpa", "byte_index": 8,  "length": 1, "multiplier": 1.37895, "offset": 0.0},
+        {"name": "tire_rl_kpa", "byte_index": 12, "length": 1, "multiplier": 1.37895, "offset": 0.0},
+        {"name": "tire_rr_kpa", "byte_index": 16, "length": 1, "multiplier": 1.37895, "offset": 0.0},
+        {"name": "tire_fl_temp_celsius", "byte_index": 5, "length": 1, "multiplier": 1.0, "offset": -50.0, "enabled": false},
+        {"name": "tire_fr_temp_celsius", "byte_index": 9, "length": 1, "multiplier": 1.0, "offset": -50.0, "enabled": false},
+        {"name": "tire_rl_temp_celsius", "byte_index": 13, "length": 1, "multiplier": 1.0, "offset": -50.0, "enabled": false},
+        {"name": "tire_rr_temp_celsius", "byte_index": 17, "length": 1, "multiplier": 1.0, "offset": -50.0, "enabled": false}
       ]
     }
   ]
