@@ -111,6 +111,10 @@ pub struct EmuConfig {
     /// Close the link after this many monitor lines, with no prompt: the
     /// host side then reads end-of-file.
     pub monitor_close_after: Option<usize>,
+    /// Answer the flow-control commands (ATFCSH, ATFCSD, ATFCSM) with "?",
+    /// as adapters without them do. Multi-frame replies are still printed in
+    /// full: such adapters send the flow-control frame by themselves.
+    pub no_flow_control_commands: bool,
 }
 
 impl Default for EmuConfig {
@@ -130,6 +134,7 @@ impl Default for EmuConfig {
             monitor_stop_delay_ms: 0,
             monitor_self_stop_after: None,
             monitor_close_after: None,
+            no_flow_control_commands: false,
         }
     }
 }
@@ -427,6 +432,7 @@ fn at_command(cmd: &str, st: &mut State, cfg: &EmuConfig) -> Option<String> {
                 "OK".to_string()
             })
             .or(Some("?".into())),
+        _ if cfg.no_flow_control_commands && arg.starts_with("FCS") => Some("?".into()),
         _ if arg.starts_with("FCSH") => parse_header(&arg[4..])
             .map(|_| "OK".to_string())
             .or(Some("?".into())),

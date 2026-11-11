@@ -50,6 +50,9 @@ pub struct Elm327Session<T> {
     /// Set when a command timed out, so its late reply is still in flight.
     /// The next `send_cmd` reads up to the prompt before writing.
     out_of_sync: bool,
+    /// False once the adapter has answered ATFCSH with "?": it has no
+    /// flow-control commands, and they are not sent again on this link.
+    flow_control_commands: bool,
 }
 
 impl<T> Elm327Session<T>
@@ -60,6 +63,7 @@ where
         Self {
             stream: BufReader::new(stream),
             out_of_sync: false,
+            flow_control_commands: true,
         }
     }
 
@@ -299,10 +303,7 @@ where
         self.send_header_cmd(&format!("ATSH{}", uds.ecu_tx)).await?;
         self.send_header_cmd(&format!("ATCRA{}", uds.ecu_rx))
             .await?;
-        self.send_header_cmd(&format!("ATFCSH{}", uds.ecu_tx))
-            .await?;
-        self.send_cmd("ATFCSD300000").await?;
-        self.send_cmd("ATFCSM1").await?;
+        self.set_flow_control(&uds.ecu_tx).await?;
         // Single-frame parsing expects replies without the CAN-ID prefix.
         self.send_cmd("ATH0").await?;
         if let Some(pre) = &uds.pre_request {
@@ -338,6 +339,27 @@ where
         Ok(())
     }
 
+    /// Tell the adapter to send its ISO-TP flow-control frame to `ecu_tx`.
+    ///
+    /// The three commands are one setting: ATFCSM1 selects the header and data
+    /// given by ATFCSH and ATFCSD. An adapter that answers ATFCSH with "?" has
+    /// none of them and sends the flow-control frame to the ATSH address by
+    /// itself, so the other two are skipped and it stays in that mode.
+    async fn set_flow_control(&mut self, ecu_tx: &str) -> Result<()> {
+        if !self.flow_control_commands {
+            return Ok(());
+        }
+        let reply = self.send_cmd(&format!("ATFCSH{ecu_tx}")).await?;
+        if String::from_utf8_lossy(&reply).contains('?') {
+            warn!("adapter has no flow-control commands (ATFCSH rejected); using its automatic flow control");
+            self.flow_control_commands = false;
+            return Ok(());
+        }
+        self.send_cmd("ATFCSD300000").await?;
+        self.send_cmd("ATFCSM1").await?;
+        Ok(())
+    }
+
     /// Poll a uds_pid source with ISO-TP flow-control reassembly, for responses
     /// that span multiple frames. Used when the source sets multiframe = true.
     pub async fn poll_uds_pid_multiframe(&mut self, uds: &UdsPidSource) -> Result<Vec<u8>> {
@@ -347,10 +369,7 @@ where
         self.send_header_cmd(&format!("ATSH{}", uds.ecu_tx)).await?;
         self.send_header_cmd(&format!("ATCRA{}", uds.ecu_rx))
             .await?;
-        self.send_header_cmd(&format!("ATFCSH{}", uds.ecu_tx))
-            .await?;
-        self.send_cmd("ATFCSD300000").await?;
-        self.send_cmd("ATFCSM1").await?;
+        self.set_flow_control(&uds.ecu_tx).await?;
         self.send_cmd("ATH0").await?;
         if let Some(pre) = &uds.pre_request {
             // As in poll_uds_pid, errors are ignored.

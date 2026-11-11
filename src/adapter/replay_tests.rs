@@ -1266,3 +1266,45 @@ async fn single_frame_header_command_rejected_by_adapter_is_an_error() {
     let r = s.poll_uds_pid(&bad).await.map_err(|e| format!("{e:#}"));
     assert!(r.as_ref().is_err_and(|e| e.contains("ATSH")), "{r:?}");
 }
+
+/// An adapter without the flow-control commands answers ATFCSH with "?". It
+/// sends the flow-control frame by itself, so single-frame and multi-frame
+/// replies are read as usual and the commands are not sent again.
+#[tokio::test(start_paused = true)]
+async fn adapter_without_flow_control_commands_is_polled() {
+    let all = vectors();
+    let rpm = all
+        .iter()
+        .find(|v| v.profile == "golf_mk7" && v.pid == "010C")
+        .unwrap();
+    let soc = all
+        .iter()
+        .find(|v| v.profile == "niro" && v.pid == "220105")
+        .unwrap();
+    assert!(soc.frames.len() > 1, "220105 is a multi-frame reply");
+    let golf = profile("golf_mk7");
+    let niro = profile("niro");
+    let cfg = EmuConfig {
+        no_flow_control_commands: true,
+        ..EmuConfig::default()
+    };
+    let (host, log) = emu::spawn(cfg, vec![ecu_for(rpm), ecu_for(soc)]);
+    let mut s = Elm327Session::new(host);
+    s.run_init(DEFAULT_INIT).await.unwrap();
+    let after_init = log.lock().unwrap().len();
+    for _ in 0..2 {
+        let got = poll_source(&mut s, uds_source(&golf, "010C")).await;
+        assert_eq!(compare(&rpm.id, &got, &rpm.expected), Vec::<String>::new());
+        let got = poll_source(&mut s, uds_source(&niro, "220105")).await;
+        assert_eq!(compare(&soc.id, &got, &soc.expected), Vec::<String>::new());
+    }
+    let sent: Vec<String> = log
+        .lock()
+        .unwrap()
+        .iter()
+        .skip(after_init)
+        .map(|(c, _)| c.clone())
+        .filter(|c| c.starts_with("ATFCS"))
+        .collect();
+    assert_eq!(sent, ["ATFCSH7E0"]);
+}
