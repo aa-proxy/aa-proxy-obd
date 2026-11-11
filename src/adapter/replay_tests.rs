@@ -4,7 +4,7 @@
 // Data sources:
 //   testdata/obdb_vectors.json - OBDb test-case recordings from the OBDb
 //     repositories (https://github.com/OBDb/<name>) Hyundai-IONIQ-5 2477928,
-//     Hyundai-Kona-Electric f898afb, Kia-EV6 b6fb1f7, Kia-Niro-EV 8cd9845,
+//     Hyundai-Kona-Electric f898afb, Kia-EV6 b6fb1f7, Kia-Niro-EV 66f8665,
 //     MG-MG4 a1bb5c0, Renault-ZOE 5c01658, with OBDb's expected values
 //     converted to profile units.
 //   LIVE_EV6 below - a 2023 EV6 adapter session log (2026-05-14).
